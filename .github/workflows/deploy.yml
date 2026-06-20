@@ -1,27 +1,15 @@
-# Builds the static export and deploys it to GitHub Pages.
-#
-# IMPORTANT — repository layout:
-# This Next.js project lives in the `captionforge-app/` subfolder of the
-# `AI-Clipping-Tools` repo, so every step runs with that working directory and
-# the Pages artifact is uploaded from `captionforge-app/out`.
-#
-# If you ever rename the repo, update `repositoryName` in next.config.ts and
-# `REPO_NAME` in lib/basePath.ts so the base path matches the new Pages URL.
-
 name: Deploy to GitHub Pages
 
 on:
   push:
     branches: [main]
-  workflow_dispatch: # lets you trigger a deploy manually from the Actions tab
+  workflow_dispatch:
 
-# Allow this workflow to publish to Pages.
 permissions:
   contents: read
   pages: write
   id-token: write
 
-# Only one Pages deployment at a time; newer pushes cancel older in-progress runs.
 concurrency:
   group: pages
   cancel-in-progress: true
@@ -63,7 +51,7 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
-        path: out
+          path: out
 
   deploy:
     needs: build
