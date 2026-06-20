@@ -56,6 +56,7 @@ const C = {
 };
 
 const FONTS = [
+  "Komika Axis", "Montserrat ExtraBold",
   "Inter", "Poppins", "Montserrat", "Bebas Neue", "Anton",
   "Archivo Black", "Space Grotesk", "Roboto", "Oswald", "Arial",
 ];
@@ -450,44 +451,30 @@ export default function CaptionEditor() {
     let raw: { start: number; end: number; text: string }[] = [];
 
     if (srtText) {
+      // Real captions from an imported SRT/VTT file.
       raw = parseSubs(srtText);
     } else if (video) {
+      // STATIC BUILD: there is no server to run speech-to-text. Real in-browser
+      // transcription (Whisper via Transformers.js / WebGPU) is a separate
+      // feature. For now Auto-Generate lays out evenly-timed placeholder
+      // segments so you can dial in the preset look, then edit the text or
+      // import an SRT for real wording. This is deliberately NOT presented as
+      // a transcription of the actual audio.
       setTranscribing(true);
-      setTranscribeError(null);
-      try {
-        const blob = await fetch(video.url).then((r) => r.blob());
-        const form = new FormData();
-        form.append("file", blob, video.name);
-        form.append("wordsPerSubtitle", String(preset.style.wordsPerSubtitle || 5));
-        const res = await fetch("/api/transcribe", { method: "POST", body: form });
-        if (!res.ok) {
-          const j = await res.json().catch(() => ({}));
-          throw new Error(j.error || `Transcription failed (${res.status})`);
-        }
-        const data = await res.json();
-        raw = data.segments || [];
-      } catch (err: unknown) {
-        // No transcription provider configured, or the request failed — fall
-        // back to a timed demo split so the preset system is still testable.
-        const msg = err instanceof Error ? err.message : "unknown error";
-        setTranscribeError(
-          msg.includes("not configured")
-            ? "No transcription provider configured — showing a demo split. Add an API key in .env.local to transcribe real speech."
-            : `Transcription failed: ${msg}. Showing a demo split instead.`
-        );
-        const sample =
-          "this is a generated caption preview each phrase is timed across your clip so you can confirm the preset look before wiring real speech to text"
-            .split(" ");
-        const per = preset.style.wordsPerSubtitle || 5;
-        const count = Math.max(1, Math.floor(video.duration / 2.2));
-        for (let i = 0; i < count; i++) {
-          const chunk: string[] = [];
-          for (let k = 0; k < per; k++) chunk.push(sample[(i * per + k) % sample.length]);
-          raw.push({ start: i * 2.2, end: i * 2.2 + 2.0, text: chunk.join(" ") });
-        }
-      } finally {
-        setTranscribing(false);
+      setTranscribeError(
+        "Auto-Generate created evenly-timed placeholder captions to preview your preset. Edit the text, or import an SRT/VTT for real wording. (In-browser speech-to-text is a planned addition.)"
+      );
+      const sample =
+        "edit this caption or import an srt for the real words this preview is timed across your clip so you can confirm the preset look"
+          .split(" ");
+      const per = preset.style.wordsPerSubtitle || 5;
+      const count = Math.max(1, Math.floor(video.duration / 2.2));
+      for (let i = 0; i < count; i++) {
+        const chunk: string[] = [];
+        for (let k = 0; k < per; k++) chunk.push(sample[(i * per + k) % sample.length]);
+        raw.push({ start: i * 2.2, end: i * 2.2 + 2.0, text: chunk.join(" ") });
       }
+      setTranscribing(false);
     }
 
     if (!raw.length) {
@@ -620,46 +607,203 @@ export default function CaptionEditor() {
 
   const [rendering, setRendering] = useState(false);
   const [renderError, setRenderError] = useState<string | null>(null);
-  const renderAbort = useRef<AbortController | null>(null);
+  const [renderProgress, setRenderProgress] = useState(0);
+  const cancelRenderRef = useRef(false);
+
+  // Word-wrap text to a max pixel width, capped at maxLines.
+  function wrapLines(ctx: CanvasRenderingContext2D, text: string, maxW: number, maxLines: number): string[] {
+    const words = text.split(/\s+/).filter(Boolean);
+    const lines: string[] = [];
+    let cur = "";
+    for (const w of words) {
+      const test = cur ? `${cur} ${w}` : w;
+      if (ctx.measureText(test).width > maxW && cur) {
+        lines.push(cur);
+        cur = w;
+        if (lines.length >= maxLines) break;
+      } else {
+        cur = test;
+      }
+    }
+    if (cur && lines.length < maxLines) lines.push(cur);
+    return lines.length ? lines : [text];
+  }
+
+  // Draw one caption onto the export canvas at native resolution. Uses a real
+  // canvas text stroke for the outline (not a shadow), mirroring the preview.
+  function drawCaptionToCanvas(
+    ctx: CanvasRenderingContext2D, W: number, H: number, seg: Segment, style: SubtitleStyle, t: number
+  ) {
+    const text = applyCaps(seg.text, style.caps);
+    const fontPx = (style.fontSizePct / 100) * H;
+    const outlinePx = (style.outlineWidthPct / 100) * fontPx;
+    const fam = style.customFontName || style.fontFamily;
+    ctx.font = `${style.italic ? "italic " : ""}${style.bold ? "800" : "500"} ${fontPx}px '${fam}', sans-serif`;
+    ctx.textBaseline = "middle";
+    ctx.textAlign = style.align as CanvasTextAlign;
+    ctx.lineJoin = "round";
+    ctx.miterLimit = 2;
+
+    const maxW = (style.maxWidthPct / 100) * W;
+    const lines = wrapLines(ctx, text, maxW, style.maxLines || 2);
+    const lineH = fontPx * style.lineSpacing;
+    const cx = (style.x / 100) * W;
+    const cy = (style.y / 100) * H;
+    const startY = cy - ((lines.length - 1) * lineH) / 2;
+    const anchorX = style.align === "left" ? cx - maxW / 2 : style.align === "right" ? cx + maxW / 2 : cx;
+
+    // optional background box
+    if (style.bgOpacity > 0) {
+      const widest = Math.max(...lines.map((l) => ctx.measureText(l).width));
+      const pad = style.bgPadding;
+      const bw = widest + pad * 2;
+      const bh = lines.length * lineH + pad * 2;
+      ctx.fillStyle = hexA(style.bgColor, style.bgOpacity);
+      const bx = cx - bw / 2;
+      const by = startY - lineH / 2 - pad;
+      const r = style.cornerRadius;
+      ctx.beginPath();
+      ctx.roundRect(bx, by, bw, bh, r);
+      ctx.fill();
+    }
+
+    lines.forEach((line, i) => {
+      const y = startY + i * lineH;
+      // shadow
+      if (style.shadowBlur > 0 || style.shadowDistance > 0) {
+        ctx.save();
+        ctx.shadowColor = hexA(style.shadowColor, style.shadowOpacity);
+        ctx.shadowBlur = style.shadowBlur;
+        ctx.shadowOffsetX = style.shadowDistance;
+        ctx.shadowOffsetY = style.shadowDistance;
+        ctx.fillStyle = style.color;
+        ctx.fillText(line, anchorX, y);
+        ctx.restore();
+      }
+      // real outline stroke (drawn outer, doubled because stroke is centred)
+      if (outlinePx > 0) {
+        ctx.lineWidth = outlinePx * 2;
+        ctx.strokeStyle = hexA(style.outlineColor, style.outlineOpacity);
+        ctx.strokeText(line, anchorX, y);
+      }
+      // fill (with per-word highlight for word/karaoke animations)
+      const isHL = style.animation === "wordHighlight" || style.animation === "karaoke";
+      if (isHL && lines.length === 1) {
+        const words = line.split(/\s+/);
+        const dur = Math.max(0.001, seg.end - seg.start);
+        const active = Math.floor(clamp((t - seg.start) / dur, 0, 1) * words.length);
+        let penX = style.align === "center" ? anchorX - ctx.measureText(line).width / 2 : anchorX;
+        const prevAlign = ctx.textAlign;
+        ctx.textAlign = "left";
+        words.forEach((w, wi) => {
+          ctx.fillStyle = wi <= active ? style.highlightColor : style.color;
+          ctx.fillText(w, penX, y);
+          penX += ctx.measureText(w + " ").width;
+        });
+        ctx.textAlign = prevAlign;
+      } else {
+        ctx.fillStyle = style.color;
+        ctx.fillText(line, anchorX, y);
+      }
+    });
+  }
 
   async function renderVideo() {
     if (!video) return;
     setRendering(true);
     setRenderError(null);
-    renderAbort.current = new AbortController();
-    try {
-      const blob = await fetch(video.url).then((r) => r.blob());
-      const form = new FormData();
-      form.append("file", blob, video.name);
-      form.append(
-        "segments",
-        JSON.stringify(segments.map((s) => ({ start: s.start, end: s.end, text: s.text, style: styleFor(s) })))
-      );
-      form.append("resolution", "original");
-      form.append("fps", "original");
-      form.append("quality", "high");
+    setRenderProgress(0);
+    cancelRenderRef.current = false;
 
-      const res = await fetch("/api/export", { method: "POST", body: form, signal: renderAbort.current.signal });
-      if (!res.ok) {
-        const j = await res.json().catch(() => ({}));
-        throw new Error(j.detail || j.error || `Render failed (${res.status})`);
+    // Hidden source video at native resolution + canvas we paint onto.
+    const src = document.createElement("video");
+    src.src = video.url;
+    src.muted = false;
+    src.crossOrigin = "anonymous";
+    const canvas = document.createElement("canvas");
+
+    try {
+      await document.fonts.ready;
+      await new Promise<void>((res, rej) => {
+        src.onloadedmetadata = () => res();
+        src.onerror = () => rej(new Error("Could not read the video for export"));
+      });
+      canvas.width = video.w;
+      canvas.height = video.h;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) throw new Error("Canvas 2D context unavailable in this browser");
+
+      const fps = 30;
+      const vStream = canvas.captureStream(fps);
+
+      // Pull the original audio track so the export keeps sound.
+      try {
+        const el = src as HTMLVideoElement & { captureStream?: () => MediaStream; mozCaptureStream?: () => MediaStream };
+        const a = el.captureStream ? el.captureStream() : el.mozCaptureStream?.();
+        a?.getAudioTracks().forEach((tr) => vStream.addTrack(tr));
+      } catch {
+        /* audio capture not supported here; export proceeds video-only */
       }
-      const outBlob = await res.blob();
+
+      const mimeCandidates = [
+        "video/webm;codecs=vp9,opus",
+        "video/webm;codecs=vp8,opus",
+        "video/webm",
+      ];
+      const mimeType = mimeCandidates.find((m) => MediaRecorder.isTypeSupported(m));
+      if (!mimeType) throw new Error("This browser cannot record video (MediaRecorder/WebM unsupported)");
+
+      const chunks: BlobPart[] = [];
+      const rec = new MediaRecorder(vStream, { mimeType, videoBitsPerSecond: 12_000_000 });
+      rec.ondataavailable = (e) => { if (e.data.size) chunks.push(e.data); };
+
+      const done = new Promise<Blob>((resolve) => {
+        rec.onstop = () => resolve(new Blob(chunks, { type: "video/webm" }));
+      });
+
+      rec.start(100);
+      src.currentTime = 0;
+      await src.play();
+
+      // Realtime capture loop: paint each frame + the active caption.
+      await new Promise<void>((resolve) => {
+        const step = () => {
+          if (cancelRenderRef.current) { resolve(); return; }
+          ctx.drawImage(src, 0, 0, canvas.width, canvas.height);
+          const t = src.currentTime;
+          const active = segments.find((s) => t >= s.start && t < s.end);
+          if (active) drawCaptionToCanvas(ctx, canvas.width, canvas.height, active, styleFor(active), t);
+          setRenderProgress(Math.min(99, Math.round((t / video.duration) * 100)));
+          if (src.ended || t >= video.duration - 0.05) { resolve(); return; }
+          requestAnimationFrame(step);
+        };
+        requestAnimationFrame(step);
+      });
+
+      src.pause();
+      rec.stop();
+      const outBlob = await done;
+
+      if (cancelRenderRef.current) { flash("Export cancelled"); return; }
+
+      setRenderProgress(100);
       const url = URL.createObjectURL(outBlob);
       const a = document.createElement("a");
-      a.href = url; a.download = "captionforge-export.mp4"; a.click();
+      a.href = url;
+      a.download = "captionforge-export.webm";
+      a.click();
       setTimeout(() => URL.revokeObjectURL(url), 5000);
-      flash("Render complete — download started");
+      flash("Export complete — download started");
     } catch (err: unknown) {
-      if (err instanceof Error && err.name === "AbortError") flash("Export cancelled");
-      else setRenderError(err instanceof Error ? err.message : "Render failed");
+      setRenderError(err instanceof Error ? err.message : "Export failed");
     } finally {
       setRendering(false);
-      renderAbort.current = null;
+      src.removeAttribute("src");
+      src.load();
     }
   }
   function cancelRender() {
-    renderAbort.current?.abort();
+    cancelRenderRef.current = true;
   }
 
   // ---- drag caption around the preview ----
@@ -758,10 +902,10 @@ export default function CaptionEditor() {
 
           <Btn kind="ghost" onClick={exportProject} title="Export the project (presets + captions) as JSON"><Download size={14} /> Save project</Btn>
           {rendering ? (
-            <Btn kind="danger" onClick={cancelRender}><X size={14} /> Cancel export</Btn>
+            <Btn kind="danger" onClick={cancelRender}><X size={14} /> Cancel ({renderProgress}%)</Btn>
           ) : (
-            <Btn kind="solid" onClick={renderVideo} disabled={!video || segments.length === 0} title="Burn captions into the video on the server and download the result">
-              <Film size={14} /> Render & Download
+            <Btn kind="solid" onClick={renderVideo} disabled={!video || segments.length === 0} title="Burn captions into the video in your browser and download the result (.webm)">
+              <Film size={14} /> Render &amp; Download
             </Btn>
           )}
         </header>
