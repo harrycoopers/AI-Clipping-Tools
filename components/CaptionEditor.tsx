@@ -827,8 +827,18 @@ export default function CaptionEditor() {
     await src.play();
 
     await new Promise<void>((resolve) => {
+      let finished = false;
+      let watchdog = 0;
+      const finish = () => {
+        if (finished) return;
+        finished = true;
+        src.onended = null;
+        if (watchdog) clearInterval(watchdog);
+        resolve();
+      };
       const handle = (t: number) => {
-        if (cancelRenderRef.current) { resolve(); return; }
+        if (finished) return;
+        if (cancelRenderRef.current) { finish(); return; }
         // Backpressure: if the (software) encoder is falling behind, skip this
         // frame rather than queueing unbounded work, which would spike memory.
         if (t - lastT >= minDelta && videoEncoder.encodeQueueSize < 12) {
@@ -839,18 +849,31 @@ export default function CaptionEditor() {
           lastT = t; frameCount++;
           setRenderProgress(Math.min(99, Math.round((t / video.duration) * 100)));
         }
-        if (src.ended || t >= video.duration - 0.05) { resolve(); return; }
+        if (src.ended || t >= video.duration - 0.05) { finish(); return; }
         next();
       };
+      // The frame callback stops firing when the video ends, so finish on the
+      // `ended` event too — and a timer catches stalls and honours Cancel even
+      // if no callback is running.
+      src.onended = finish;
+      watchdog = window.setInterval(() => {
+        if (cancelRenderRef.current || src.ended || src.currentTime >= video.duration - 0.05) finish();
+      }, 250);
+
       const rVFC = (src as any).requestVideoFrameCallback?.bind(src);
       const next = rVFC
-        ? () => rVFC((_now: number, meta: any) => handle(meta?.mediaTime ?? src.currentTime))
-        : () => requestAnimationFrame(() => handle(src.currentTime));
+        ? () => { if (!finished) rVFC((_now: number, meta: any) => handle(meta?.mediaTime ?? src.currentTime)); }
+        : () => { if (!finished) requestAnimationFrame(() => handle(src.currentTime)); };
       next();
     });
 
     src.pause();
-    await videoEncoder.flush();
+    if (cancelRenderRef.current) { try { videoEncoder.close(); } catch { /* ignore */ } throw new Error("Export cancelled"); }
+    // Guard the final flush so a wedged encoder can't hang the UI forever.
+    await Promise.race([
+      videoEncoder.flush(),
+      new Promise((_, rej) => setTimeout(() => rej(new Error("Encoder timed out while finishing")), 30000)),
+    ]);
     muxer.finalize();
     const { buffer } = muxer.target as { buffer: ArrayBuffer };
     return new Blob([buffer], { type: "video/mp4" });
