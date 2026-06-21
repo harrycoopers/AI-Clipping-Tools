@@ -620,27 +620,12 @@ export default function CaptionEditor() {
   const [renderProgress, setRenderProgress] = useState(0);
   const [renderStatus, setRenderStatus] = useState("");
   const [renderedVideoUrl, setRenderedVideoUrl] = useState<string | null>(null);
-  const [exportDestination, setExportDestination] = useState<"downloads" | "ask">("downloads");
   const cancelRenderRef = useRef(false);
   const renderedVideoUrlRef = useRef<string | null>(null);
-
-  useEffect(() => {
-    try {
-      const saved = window.localStorage.getItem("captionforge-export-destination");
-      if (saved === "downloads" || saved === "ask") setExportDestination(saved);
-    } catch { /* Storage can be unavailable in private/restricted contexts. */ }
-  }, []);
 
   useEffect(() => () => {
     if (renderedVideoUrlRef.current) URL.revokeObjectURL(renderedVideoUrlRef.current);
   }, []);
-
-  function changeExportDestination(value: "downloads" | "ask") {
-    setExportDestination(value);
-    try {
-      window.localStorage.setItem("captionforge-export-destination", value);
-    } catch { /* Keep the setting for the current session. */ }
-  }
 
   // Word-wrap text to a max pixel width, capped at maxLines.
   function wrapLines(ctx: CanvasRenderingContext2D, text: string, maxW: number, maxLines: number): string[] {
@@ -814,45 +799,20 @@ export default function CaptionEditor() {
     let ff: any = null;
     let activeStream: MediaStream | null = null;
     let activeRecorder: MediaRecorder | null = null;
-    let outputHandle: any = null;
 
     try {
-      // Ask for the output file while the click still has user activation.
-      // Browsers may block a synthetic anchor click after a long render.
-      const showSaveFilePicker = (window as any).showSaveFilePicker as
-        | ((options: any) => Promise<any>)
-        | undefined;
-      if (exportDestination === "ask" && showSaveFilePicker) {
-        setRenderStatus("Choose where to save the finished MP4…");
-        outputHandle = await showSaveFilePicker({
-          suggestedName: "captionforge-export.mp4",
-          types: [{
-            description: "MP4 video",
-            accept: { "video/mp4": [".mp4"] },
-          }],
-        });
-      } else if (exportDestination === "ask" && !showSaveFilePicker) {
-        flash("This browser cannot choose a folder; the MP4 will use your Downloads folder");
-      }
-
       const saveFinishedVideo = async (blob: Blob) => {
-        if (outputHandle) {
-          const writable = await outputHandle.createWritable();
-          await writable.write(blob);
-          await writable.close();
-        } else {
-          if (renderedVideoUrlRef.current) URL.revokeObjectURL(renderedVideoUrlRef.current);
-          const url = URL.createObjectURL(blob);
-          renderedVideoUrlRef.current = url;
-          setRenderedVideoUrl(url);
-          const a = document.createElement("a");
-          a.href = url;
-          a.download = "captionforge-export.mp4";
-          a.style.display = "none";
-          document.body.appendChild(a);
-          a.click();
-          a.remove();
-        }
+        if (renderedVideoUrlRef.current) URL.revokeObjectURL(renderedVideoUrlRef.current);
+        const url = URL.createObjectURL(blob);
+        renderedVideoUrlRef.current = url;
+        setRenderedVideoUrl(url);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = "captionforge.mp4";
+        a.style.display = "none";
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
       };
 
       await document.fonts.ready;
@@ -1162,17 +1122,6 @@ export default function CaptionEditor() {
           </div>
 
           <Btn kind="ghost" onClick={exportProject} title="Export the project (presets + captions) as JSON"><Download size={14} /> Save project</Btn>
-          <select
-            aria-label="Export destination"
-            title="Choose whether finished videos download automatically or ask for a save location"
-            value={exportDestination}
-            onChange={(e) => changeExportDestination(e.target.value as "downloads" | "ask")}
-            disabled={rendering}
-            style={{ ...selS(), width: 170, padding: "8px 9px", background: C.panel }}
-          >
-            <option value="downloads">Auto: Downloads</option>
-            <option value="ask">Ask where to save</option>
-          </select>
           {rendering ? (
             <Btn kind="danger" onClick={cancelRender} title={renderStatus || "Rendering"}><X size={14} /> Cancel ({renderProgress}%)</Btn>
           ) : (
@@ -1488,10 +1437,10 @@ export default function CaptionEditor() {
       {renderedVideoUrl && !rendering && (
         <a
           href={renderedVideoUrl}
-          download="captionforge-export.mp4"
+          download="captionforge.mp4"
           style={{ position: "fixed", top: renderError ? 110 : 64, left: "50%", transform: "translateX(-50%)", background: C.amber, color: "#1a1300", padding: "10px 18px", borderRadius: 10, fontSize: 13, fontWeight: 800, zIndex: 90, textDecoration: "none", boxShadow: "0 12px 36px rgba(0,0,0,.45)" }}
         >
-          Download finished MP4
+          Download captionforge.mp4
         </a>
       )}
       {transcribeError && (
