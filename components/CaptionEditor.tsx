@@ -27,6 +27,7 @@ import {
 
 interface VideoMeta {
   url: string;
+  file: File;
   name: string;
   size: number;
   duration: number;
@@ -399,7 +400,7 @@ export default function CaptionEditor() {
     const v = document.createElement("video");
     v.preload = "metadata";
     v.onloadedmetadata = () => {
-      setVideo({ url, name: file.name, size: file.size, duration: v.duration, w: v.videoWidth, h: v.videoHeight });
+      setVideo({ url, file, name: file.name, size: file.size, duration: v.duration, w: v.videoWidth, h: v.videoHeight });
       setCurrentTime(0); setPlaying(false);
     };
     v.onerror = () => flash("Could not read this video file");
@@ -589,9 +590,18 @@ export default function CaptionEditor() {
 
   function download(name: string, text: string, type = "application/json") {
     const blob = new Blob([text], { type });
+    downloadBlob(name, blob);
+  }
+  function downloadBlob(name: string, blob: Blob) {
     const url = URL.createObjectURL(blob);
-    const a = document.createElement("a"); a.href = url; a.download = name; a.click();
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = name;
+    a.style.display = "none";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 60_000);
   }
   function exportSRT() {
     const srt = segments.map((s, i) => `${i + 1}\n${srtTime(s.start)} --> ${srtTime(s.end)}\n${s.text}\n`).join("\n");
@@ -745,17 +755,21 @@ export default function CaptionEditor() {
     cancelRenderRef.current = false;
 
     const src = document.createElement("video");
-    src.src = video.url;
+    src.preload = "auto";
     src.muted = true;
     (src as any).playsInline = true;
     const canvas = document.createElement("canvas");
     let ff: any = null;
+    let activeStream: MediaStream | null = null;
+    let activeRecorder: MediaRecorder | null = null;
 
     try {
       await document.fonts.ready;
-      await new Promise<void>((res, rej) => {
-        src.onloadedmetadata = () => res();
-        src.onerror = () => rej(new Error("Could not read the video for export"));
+      await new Promise<void>((resolve, reject) => {
+        src.onloadedmetadata = () => resolve();
+        src.onerror = () => reject(new Error("Could not read the video for export"));
+        src.src = video.url;
+        if (src.readyState >= HTMLMediaElement.HAVE_METADATA) resolve();
       });
 
       // Even dimensions for H.264; cap longest side at 1280 to keep memory/time sane.
@@ -769,78 +783,139 @@ export default function CaptionEditor() {
 
       const fps = 30;
       const duration = video.duration;
-      const frameCount = Math.max(1, Math.ceil(duration * fps));
 
       // Load the encoder first so a network problem stops here with a clear message.
       ff = await loadFFmpeg();
 
-      // 1) Capture frames deterministically by seeking. Drawing to a 2D canvas
-      //    is software work and does not crash like the video encoder did.
-      const seekTo = (t: number) => new Promise<void>((resolve) => {
-        let settled = false;
-        const done = () => { if (!settled) { settled = true; src.removeEventListener("seeked", done); resolve(); } };
-        src.addEventListener("seeked", done);
-        src.currentTime = Math.min(t, Math.max(0, duration - 1 / fps));
-        setTimeout(done, 2500); // safety if 'seeked' is missed
+      // Record the composited canvas as one compressed stream. Keeping every
+      // frame as a separate JPEG in FFmpeg's WASM filesystem exhausted browser
+      // memory on normal-length videos before an MP4 could be produced.
+      if (!canvas.captureStream || typeof MediaRecorder === "undefined") {
+        throw new Error("This browser cannot render video. Use the latest Chrome or Edge.");
+      }
+      const canvasStream = canvas.captureStream(fps);
+      activeStream = canvasStream;
+      const sourceWithCapture = src as HTMLVideoElement & {
+        captureStream?: () => MediaStream;
+        mozCaptureStream?: () => MediaStream;
+      };
+      const sourceCapture = sourceWithCapture.captureStream || sourceWithCapture.mozCaptureStream;
+      if (sourceCapture) {
+        try {
+          sourceCapture.call(src).getAudioTracks().forEach((track) => canvasStream.addTrack(track));
+        } catch { /* FFmpeg can fall back to audio from the source file. */ }
+      }
+
+      const mimeType = [
+        "video/webm;codecs=vp9,opus",
+        "video/webm;codecs=vp8,opus",
+        "video/webm",
+      ].find((type) => MediaRecorder.isTypeSupported(type));
+      if (!mimeType) throw new Error("This browser does not provide a compatible video recorder.");
+
+      const chunks: BlobPart[] = [];
+      const recorder = new MediaRecorder(canvasStream, {
+        mimeType,
+        videoBitsPerSecond: Math.min(12_000_000, Math.max(2_500_000, W * H * 5)),
       });
-      const toJpeg = (): Promise<Uint8Array> => new Promise((resolve, reject) => {
-        canvas.toBlob(async (b) => {
-          if (!b) { reject(new Error("Frame capture failed")); return; }
-          resolve(new Uint8Array(await b.arrayBuffer()));
-        }, "image/jpeg", 0.9);
+      activeRecorder = recorder;
+      const recordingDone = new Promise<void>((resolve, reject) => {
+        recorder.ondataavailable = (event) => { if (event.data.size) chunks.push(event.data); };
+        recorder.onerror = () => reject(new Error("The browser stopped while rendering the video."));
+        recorder.onstop = () => resolve();
       });
 
-      setRenderStatus("Rendering frames…");
-      for (let i = 0; i < frameCount; i++) {
-        if (cancelRenderRef.current) { flash("Export cancelled"); return; }
-        await seekTo(i / fps);
-        paintFrame(ctx, src, W, H, src.currentTime);
-        await ff.writeFile(`f${String(i).padStart(5, "0")}.jpg`, await toJpeg());
-        setRenderProgress(Math.round((i / frameCount) * 70)); // frame capture = first 70%
-      }
+      setRenderStatus("Rendering video with subtitles…");
+      src.currentTime = 0;
+      paintFrame(ctx, src, W, H, 0);
+      recorder.start(1000);
+      await src.play();
+      await new Promise<void>((resolve, reject) => {
+        let raf = 0;
+        const finish = () => {
+          cancelAnimationFrame(raf);
+          src.removeEventListener("ended", finish);
+          resolve();
+        };
+        const draw = () => {
+          if (cancelRenderRef.current) {
+            src.pause();
+            finish();
+            return;
+          }
+          try {
+            paintFrame(ctx, src, W, H, src.currentTime);
+            setRenderProgress(Math.min(65, Math.round((src.currentTime / duration) * 65)));
+            raf = requestAnimationFrame(draw);
+          } catch (error) {
+            cancelAnimationFrame(raf);
+            reject(error);
+          }
+        };
+        src.addEventListener("ended", finish, { once: true });
+        draw();
+      });
+      if (recorder.state !== "inactive") recorder.stop();
+      await recordingDone;
+      canvasStream.getTracks().forEach((track) => track.stop());
       if (cancelRenderRef.current) { flash("Export cancelled"); return; }
 
-      // 2) Write the original file so FFmpeg can mux its audio (best-effort).
+      const recording = new Blob(chunks, { type: mimeType });
+      if (!recording.size) throw new Error("The browser produced an empty video recording.");
+      await ff.writeFile("rendered.webm", new Uint8Array(await recording.arrayBuffer()));
+
+      // Write the original file so FFmpeg can use its audio when the browser
+      // does not expose an audio track through captureStream.
       const safeExt = (video.name.split(".").pop() || "mp4").toLowerCase().replace(/[^a-z0-9]/g, "") || "mp4";
       const inputName = `input.${safeExt}`;
       let hasAudioInput = false;
       try {
         setRenderStatus("Adding audio…");
-        const srcBytes = new Uint8Array((await fetch(video.url).then((r) => r.arrayBuffer())) as ArrayBuffer);
+        const srcBytes = new Uint8Array(await video.file.arrayBuffer());
         await ff.writeFile(inputName, srcBytes);
         hasAudioInput = true;
       } catch { hasAudioInput = false; }
 
-      // 3) Encode the JPEG sequence to H.264 + AAC MP4 (pure CPU/WASM).
+      // Convert the captioned recording to H.264 + AAC MP4.
       setRenderStatus("Encoding MP4… (this part is CPU-only and may take a while)");
       ff.on("progress", ({ progress }: { progress: number }) => {
-        if (progress >= 0 && progress <= 1) setRenderProgress(70 + Math.round(progress * 29));
+        if (progress >= 0 && progress <= 1) setRenderProgress(65 + Math.round(progress * 34));
       });
-      const args = ["-framerate", String(fps), "-start_number", "0", "-i", "f%05d.jpg"];
-      if (hasAudioInput) args.push("-i", inputName, "-map", "0:v:0", "-map", "1:a:0?");
-      args.push("-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "veryfast", "-crf", "23");
-      if (hasAudioInput) args.push("-c:a", "aac", "-b:a", "128k", "-shortest");
-      args.push("output.mp4");
-      await ff.exec(args);
+      const args = ["-i", "rendered.webm"];
+      if (hasAudioInput) {
+        args.push("-i", inputName, "-map", "0:v:0", "-map", "1:a:0?", "-shortest");
+      } else {
+        args.push("-map", "0:v:0", "-map", "0:a:0?");
+      }
+      args.push(
+        "-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "veryfast", "-crf", "23",
+        "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", "output.mp4"
+      );
+      const exitCode = await ff.exec(args);
+      if (exitCode !== 0) throw new Error(`MP4 encoding failed (FFmpeg exit code ${exitCode}).`);
 
       if (cancelRenderRef.current) { flash("Export cancelled"); return; }
 
       const out = await ff.readFile("output.mp4");
-      const blob = new Blob([out as any], { type: "video/mp4" });
+      if (!(out instanceof Uint8Array) || out.byteLength === 0) {
+        throw new Error("MP4 encoding completed without producing a video file.");
+      }
+      const outputBytes = new Uint8Array(out.byteLength);
+      outputBytes.set(out);
+      const blob = new Blob([outputBytes.buffer], { type: "video/mp4" });
 
       setRenderProgress(100);
       setRenderStatus("");
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = "captionforge-export.mp4";
-      a.click();
-      setTimeout(() => URL.revokeObjectURL(url), 8000);
+      downloadBlob("captionforge-export.mp4", blob);
       flash("MP4 export complete — download started");
     } catch (err: unknown) {
       setRenderError(err instanceof Error ? err.message : "Export failed");
     } finally {
       try { ff?.terminate(); } catch { /* ignore */ }
+      try {
+        if (activeRecorder?.state !== "inactive") activeRecorder?.stop();
+      } catch { /* ignore */ }
+      activeStream?.getTracks().forEach((track) => track.stop());
       setRendering(false);
       setRenderStatus("");
       src.removeAttribute("src");

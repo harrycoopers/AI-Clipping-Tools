@@ -6,6 +6,9 @@ const repositoryName = "AI-Clipping-Tools";
 
 const nextConfig: NextConfig = {
   output: "export", // emit a static `out/` folder (no Node server needed)
+  turbopack: {
+    root: process.cwd(),
+  },
   images: {
     unoptimized: true, // the Next image optimizer needs a server; disable it
   },
