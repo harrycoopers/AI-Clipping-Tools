@@ -783,6 +783,46 @@ export default function CaptionEditor() {
     );
   }
 
+  async function isSeekableVideo(blob: Blob): Promise<boolean> {
+    const url = URL.createObjectURL(blob);
+    const probe = document.createElement("video");
+    probe.preload = "metadata";
+    probe.muted = true;
+    probe.src = url;
+
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const timeout = window.setTimeout(() => reject(new Error("Metadata timeout")), 8_000);
+        probe.onloadedmetadata = () => {
+          window.clearTimeout(timeout);
+          resolve();
+        };
+        probe.onerror = () => {
+          window.clearTimeout(timeout);
+          reject(new Error("Video metadata could not be read"));
+        };
+      });
+      if (!Number.isFinite(probe.duration) || probe.duration <= 0) return false;
+
+      const target = Math.min(probe.duration * 0.6, Math.max(0, probe.duration - 0.05));
+      await new Promise<void>((resolve, reject) => {
+        const timeout = window.setTimeout(() => reject(new Error("Seek timeout")), 8_000);
+        probe.onseeked = () => {
+          window.clearTimeout(timeout);
+          resolve();
+        };
+        probe.currentTime = target;
+      });
+      return Math.abs(probe.currentTime - target) < 0.5;
+    } catch {
+      return false;
+    } finally {
+      probe.removeAttribute("src");
+      probe.load();
+      URL.revokeObjectURL(url);
+    }
+  }
+
   async function renderVideo() {
     if (!video) return;
     setRendering(true);
@@ -902,7 +942,9 @@ export default function CaptionEditor() {
       src.currentTime = 0;
       paintFrame(ctx, src, W, H, 0);
       canvasTrack.requestFrame();
-      recorder.start(1000);
+      // Do not use a timeslice for MP4. Concatenating timed MP4 fragments can
+      // produce a file that plays from the start but has no usable seek index.
+      recorder.start();
       await src.play();
       await new Promise<void>((resolve, reject) => {
         const frameIntervalMs = 1000 / fps;
@@ -944,9 +986,43 @@ export default function CaptionEditor() {
       const hasMp4Header = header.length >= 8 &&
         String.fromCharCode(header[4], header[5], header[6], header[7]) === "ftyp";
       if (mimeType.startsWith("video/mp4") && hasMp4Header) {
+        setRenderStatus("Finalizing seekable MP4…");
+        if (await isSeekableVideo(recording)) {
+          setRenderProgress(100);
+          setRenderStatus("Saving MP4…");
+          await saveFinishedVideo(recording);
+          setRenderStatus("");
+          flash("MP4 export complete");
+          return;
+        }
+
+        // Some browser builds emit fragmented MP4 without a usable duration or
+        // seek table. Remux it without re-encoding and move metadata to the
+        // beginning so the downloaded file is immediately seekable.
+        ff = await loadFFmpeg();
+        await ff.writeFile("recorded.mp4", new Uint8Array(await recording.arrayBuffer()));
+        setRenderStatus("Finalizing seekable MP4…");
+        const remuxExitCode = await ff.exec([
+          "-i", "recorded.mp4",
+          "-map", "0",
+          "-c", "copy",
+          "-movflags", "+faststart",
+          "output.mp4",
+        ]);
+        if (remuxExitCode !== 0) throw new Error("Could not finalize a seekable MP4.");
+        const remuxed = await ff.readFile("output.mp4");
+        if (!(remuxed instanceof Uint8Array) || remuxed.byteLength === 0) {
+          throw new Error("MP4 finalization did not produce a video file.");
+        }
+        const remuxedBytes = new Uint8Array(remuxed.byteLength);
+        remuxedBytes.set(remuxed);
+        const seekableBlob = new Blob([remuxedBytes.buffer], { type: "video/mp4" });
+        if (!(await isSeekableVideo(seekableBlob))) {
+          throw new Error("The finished MP4 could not be made seekable in this browser.");
+        }
         setRenderProgress(100);
         setRenderStatus("Saving MP4…");
-        await saveFinishedVideo(recording);
+        await saveFinishedVideo(seekableBlob);
         setRenderStatus("");
         flash("MP4 export complete");
         return;
@@ -996,6 +1072,9 @@ export default function CaptionEditor() {
       const outputBytes = new Uint8Array(out.byteLength);
       outputBytes.set(out);
       const blob = new Blob([outputBytes.buffer], { type: "video/mp4" });
+      if (!(await isSeekableVideo(blob))) {
+        throw new Error("The finished MP4 is not seekable.");
+      }
 
       setRenderProgress(100);
       setRenderStatus("Saving MP4…");
