@@ -20,28 +20,25 @@ https://harrycoopers.github.io/AI-Clipping-Tools/
   preset" dropdown, per-segment overrides)
 - Subtitle editing: add / delete / split / merge / duplicate, start/end times,
   search-and-replace, undo/redo, click-to-seek, active-caption highlight
+- Real local Whisper transcription through Transformers.js in a Web Worker,
+  with WebGPU-first execution, WASM fallback, word timestamps, readable cue
+  splitting, cancellation, retry, model/language controls, and cached models
 - Custom font upload (FontFace) **plus two bundled fonts**: Komika Axis and
   Montserrat ExtraBold (embedded as data URLs so they work offline and on Pages)
-- **In-browser video export** — captions are burned in with a real canvas text
-  stroke (not a shadow) via Canvas + MediaRecorder, and the file downloads
-  locally. See limitations below.
+- **In-browser MP4 export** — captions are burned in with Canvas and encoded
+  with WebCodecs into a fast-start, seek-validated MP4 that downloads locally.
 - SRT/VTT import, SRT + project-JSON export
 
-## Honest limitations (and why)
+## Browser requirements and limitations
 
-A static site has no server, so some things behave differently than a
-server-backed app:
-
-- **Auto-generate is not transcription yet.** With no server there is no
-  speech-to-text. "Auto Generate Subtitles" lays out evenly-timed *placeholder*
-  captions so you can dial in a preset, then you edit the text or **import an
-  SRT/VTT** for real wording. In-browser Whisper (Transformers.js / WebGPU) is a
-  planned addition. The UI says this plainly — it does not pretend to transcribe.
-- **Export is WebM, realtime.** The browser export uses Canvas + MediaRecorder,
-  which produces **`.webm`** (VP9/Opus) and runs in real time (a 1-min clip
-  takes ~1 min). MP4/H.264 via FFmpeg.wasm is a planned enhancement. Audio is
-  included when your browser supports `HTMLVideoElement.captureStream()`.
-- Best support is in Chrome/Edge. Safari's MediaRecorder/WebM support is limited.
+- The first transcription needs internet access to download Transformers.js and
+  the selected Whisper model. Browser caching avoids downloading it each time.
+- WebGPU is attempted first. Unsupported GPUs/browsers automatically retry with
+  WASM/CPU, which is slower.
+- Accurate Whisper models can exceed memory on phones and low-memory computers;
+  use the Fast model in that case.
+- MP4 export requires WebCodecs H.264/AAC support. Current Chrome and Edge have
+  the strongest support.
 
 The AI Voiceover, Content Ideas and Video Downloader sections described in the
 brief are **not built yet** — they are separate features to add next.

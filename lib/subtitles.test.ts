@@ -9,6 +9,7 @@ import {
   applyPresetToSegments,
   splitSegment,
   mergeSegments,
+  createSubtitleSegments,
   clamp,
   ORIGINAL_DEFAULT,
   type Preset,
@@ -159,5 +160,40 @@ describe("ORIGINAL_DEFAULT matches the spec", () => {
     expect(ORIGINAL_DEFAULT.x).toBe(50);
     expect(ORIGINAL_DEFAULT.y).toBeGreaterThan(75); // lower area
     expect(ORIGINAL_DEFAULT.bgOpacity).toBe(0);     // no box
+  });
+});
+
+describe("createSubtitleSegments", () => {
+  it("splits on punctuation and preserves word timestamps", () => {
+    const result = createSubtitleSegments([
+      { text: "Hello", timestamp: [0, 0.4] },
+      { text: "world.", timestamp: [0.4, 0.9] },
+      { text: "Next", timestamp: [1.1, 1.4] },
+      { text: "phrase", timestamp: [1.4, 1.9] },
+    ], { maxWords: 8, maxDuration: 5 });
+    expect(result).toHaveLength(2);
+    expect(result[0]).toMatchObject({ start: 0, end: 0.9, text: "Hello world." });
+    expect(result[1].words).toHaveLength(2);
+  });
+
+  it("enforces word and duration limits without overlapping cues", () => {
+    const result = createSubtitleSegments([
+      { text: "one", timestamp: [0, 0.5] },
+      { text: "two", timestamp: [0.5, 1] },
+      { text: "three", timestamp: [1, 1.5] },
+      { text: "four", timestamp: [1.5, 2] },
+    ], { maxWords: 2, maxDuration: 1.2 });
+    expect(result.map((cue) => cue.text)).toEqual(["one two", "three four"]);
+    expect(result[0].end).toBeLessThanOrEqual(result[1].start);
+  });
+
+  it("drops empty chunks and repairs missing timestamps", () => {
+    const result = createSubtitleSegments([
+      { text: " " },
+      { text: "usable" },
+      { text: "words" },
+    ], { maxWords: 4, maxDuration: 5 });
+    expect(result).toHaveLength(1);
+    expect(result[0].end).toBeGreaterThan(result[0].start);
   });
 });

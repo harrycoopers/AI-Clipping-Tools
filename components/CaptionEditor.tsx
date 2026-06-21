@@ -6,11 +6,14 @@ import {
   Merge, Download, Star, Lock, Unlock, RotateCcw, Search, Type,
   Check, X, FileUp, FileDown, Crosshair, Eye, EyeOff, Film,
   Sparkles, AlignLeft, AlignCenter, AlignRight, Pencil, Layers,
+  ChevronUp, ChevronDown as MoveDown, RefreshCw,
 } from "lucide-react";
 import {
   ORIGINAL_DEFAULT, applyCaps, srtTime, parseSubs as parseSubsLib,
-  clamp, type SubtitleStyle, type Preset, type Segment,
+  clamp, createSubtitleSegments, type SubtitleStyle, type Preset, type Segment,
+  type SubtitleWord,
 } from "@/lib/subtitles";
+import { asset } from "@/lib/basePath";
 
 /* ---------------------------------------------------------------------------
    CaptionForge — auto-subtitle preset system + working caption editor core.
@@ -38,6 +41,20 @@ interface VideoMeta {
 interface CustomFont {
   name: string;
   url: string;
+  dataUrl?: string;
+}
+
+type TranscriptionModel = "fast" | "balanced" | "accurate";
+type TranscriptionStage = "model" | "audio" | "preparation" | "transcription" | "subtitles";
+type StageStatus = "pending" | "active" | "complete";
+
+interface TranscriptionState {
+  stage: TranscriptionStage | null;
+  stages: Record<TranscriptionStage, StageStatus>;
+  modelProgress: number | null;
+  detail: string;
+  partialText: string;
+  device: "webgpu" | "wasm";
 }
 
 const C = {
@@ -113,6 +130,30 @@ function fmt(t: number) {
   return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}.${String(cs).padStart(2, "0")}`;
 }
 
+function parseEditorTime(value: string): number | null {
+  const clean = value.trim();
+  const parts = clean.split(":").map(Number);
+  if (parts.some((part) => !Number.isFinite(part))) return null;
+  if (parts.length === 2) return Math.max(0, parts[0] * 60 + parts[1]);
+  if (parts.length === 3) return Math.max(0, parts[0] * 3600 + parts[1] * 60 + parts[2]);
+  const seconds = Number(clean);
+  return Number.isFinite(seconds) ? Math.max(0, seconds) : null;
+}
+
+function activeWordIndex(seg: Segment, currentTime: number, fallbackWordCount: number) {
+  if (seg.words?.length) {
+    const exact = seg.words.findIndex((word) => currentTime >= word.start && currentTime < word.end);
+    if (exact >= 0) return exact;
+    if (currentTime >= seg.words.at(-1)!.end) return seg.words.length - 1;
+    return Math.max(0, seg.words.findIndex((word) => word.start > currentTime) - 1);
+  }
+  const duration = Math.max(0.001, seg.end - seg.start);
+  return Math.min(
+    Math.max(0, fallbackWordCount - 1),
+    Math.floor(clamp((currentTime - seg.start) / duration, 0, 0.9999) * fallbackWordCount)
+  );
+}
+
 
 
 // ===========================================================================
@@ -125,10 +166,9 @@ function CaptionLayer({ seg, style, previewH, currentTime, dragging }: {
   const outlinePx = (style.outlineWidthPct / 100) * fontPx;
   const text = applyCaps(seg.text, style.caps);
   const words = text.split(/\s+/).filter(Boolean);
-  const isHL = style.animation === "wordHighlight" || style.animation === "karaoke";
-  const dur = Math.max(0.001, seg.end - seg.start);
-  const prog = clamp((currentTime - seg.start) / dur, 0, 1);
-  const activeWord = Math.floor(prog * words.length);
+  const wordAnimations = ["wordHighlight", "karaoke", "pop", "bounce", "fade", "zoom"];
+  const isHL = wordAnimations.includes(style.animation) && !!seg.words?.length;
+  const activeWord = activeWordIndex(seg, currentTime, words.length);
 
   const shadows: string[] = [];
   const ol = outlineShadow(outlinePx, style.outlineColor, style.outlineOpacity);
@@ -174,7 +214,7 @@ function CaptionLayer({ seg, style, previewH, currentTime, dragging }: {
       <p style={textStyle}>
         {isHL
           ? words.map((w, i) => {
-              const on = i <= activeWord;
+              const on = style.animation === "karaoke" ? i <= activeWord : i === activeWord;
               return (
                 <span key={i} style={{
                   color: on ? style.highlightColor : style.color,
@@ -182,6 +222,10 @@ function CaptionLayer({ seg, style, previewH, currentTime, dragging }: {
                   borderRadius: 6,
                   padding: style.highlightBg !== "transparent" ? "0 .12em" : 0,
                   transition: "color .12s",
+                  display: "inline-block",
+                  animation: on && ["pop", "bounce", "zoom", "fade"].includes(style.animation)
+                    ? `cf-word-${style.animation} .22s ease both`
+                    : undefined,
                 }}>{w}{" "}</span>
               );
             })
@@ -353,6 +397,26 @@ export default function CaptionEditor() {
   const [renameId, setRenameId] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [replace, setReplace] = useState("");
+  const [transcriptionOpen, setTranscriptionOpen] = useState(false);
+  const [language, setLanguage] = useState("auto");
+  const [transcriptionModel, setTranscriptionModel] = useState<TranscriptionModel>("balanced");
+  const [preferWebGpu, setPreferWebGpu] = useState(true);
+  const [lastTranscriptionFailed, setLastTranscriptionFailed] = useState(false);
+  const [customFonts, setCustomFonts] = useState<CustomFont[]>([]);
+  const [transcription, setTranscription] = useState<TranscriptionState>({
+    stage: null,
+    stages: {
+      model: "pending",
+      audio: "pending",
+      preparation: "pending",
+      transcription: "pending",
+      subtitles: "pending",
+    },
+    modelProgress: null,
+    detail: "",
+    partialText: "",
+    device: "wasm",
+  });
 
   // undo / redo
   const history = useRef<{ past: string[]; future: string[] }>({ past: [], future: [] });
@@ -366,6 +430,9 @@ export default function CaptionEditor() {
   const previewRef = useRef<HTMLDivElement | null>(null);
   const dragRef = useRef<{ id: string; rect: DOMRect } | null>(null);
   const [previewH, setPreviewH] = useState(360);
+  const transcriptionWorkerRef = useRef<Worker | null>(null);
+  const transcriptionRejectRef = useRef<((reason?: unknown) => void) | null>(null);
+  const persistenceReady = useRef(false);
 
   const resolvedAutoPreset = useMemo(() => {
     const id = autoChoiceId === "__default__" ? defaultId : autoChoiceId;
@@ -375,6 +442,65 @@ export default function CaptionEditor() {
   const activePreset = presets.find((p) => p.id === activePresetId) || presets[0];
 
   const flash = (m: string) => { setToast(m); setTimeout(() => setToast(null), 2200); };
+
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem("captionforge-project-v2");
+      if (saved) {
+        const project = JSON.parse(saved);
+        if (Array.isArray(project.presets) && project.presets.length) setPresets(project.presets);
+        if (typeof project.defaultId === "string") setDefaultId(project.defaultId);
+        if (typeof project.autoChoiceId === "string") setAutoChoiceId(project.autoChoiceId);
+        if (typeof project.activePresetId === "string") setActivePresetId(project.activePresetId);
+        if (typeof project.applyDefaultToNew === "boolean") setApplyDefaultToNew(project.applyDefaultToNew);
+        if (Array.isArray(project.segments)) setSegments(project.segments);
+        if (typeof project.language === "string") setLanguage(project.language);
+        if (["fast", "balanced", "accurate"].includes(project.transcriptionModel)) {
+          setTranscriptionModel(project.transcriptionModel);
+        }
+        if (typeof project.preferWebGpu === "boolean") setPreferWebGpu(project.preferWebGpu);
+        if (Array.isArray(project.customFonts)) {
+          const restored: CustomFont[] = [];
+          for (const item of project.customFonts) {
+            if (!item?.name || !item?.dataUrl) continue;
+            const face = new FontFace(item.name, `url(${item.dataUrl})`);
+            face.load().then((loaded) => document.fonts.add(loaded)).catch(() => {});
+            restored.push({ name: item.name, url: item.dataUrl, dataUrl: item.dataUrl });
+          }
+          setCustomFonts(restored);
+        }
+      }
+    } catch {
+      localStorage.removeItem("captionforge-project-v2");
+    } finally {
+      persistenceReady.current = true;
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!persistenceReady.current) return;
+    try {
+      localStorage.setItem("captionforge-project-v2", JSON.stringify({
+        presets,
+        defaultId,
+        autoChoiceId,
+        activePresetId,
+        applyDefaultToNew,
+        segments,
+        language,
+        transcriptionModel,
+        preferWebGpu,
+        customFonts: customFonts.filter((font) => font.dataUrl).map(({ name, dataUrl }) => ({ name, dataUrl })),
+      }));
+    } catch {
+      // A large custom font can exceed localStorage quota; the live font stays loaded.
+    }
+  }, [
+    presets, defaultId, autoChoiceId, activePresetId, applyDefaultToNew,
+    segments, language, transcriptionModel, preferWebGpu, customFonts,
+  ]);
+
+  useEffect(() => () => transcriptionWorkerRef.current?.terminate(), []);
 
   // ---- effective style for a segment: preset baseline + per-segment override ----
   const styleFor = useCallback((seg: Segment): SubtitleStyle => {
@@ -408,18 +534,22 @@ export default function CaptionEditor() {
   }
 
   // ---- custom font upload ----
-  const [customFonts, setCustomFonts] = useState<CustomFont[]>([]);
   function loadFont(file: File | undefined | null) {
     if (!file) return;
     if (!/\.(ttf|otf|woff2?|woff)$/i.test(file.name)) { flash("Use a .ttf, .otf, .woff or .woff2 file"); return; }
     const name = file.name.replace(/\.[^.]+$/, "").replace(/[^a-zA-Z0-9 _-]/g, "");
-    const url = URL.createObjectURL(file);
-    const ff = new FontFace(name, `url(${url})`);
-    ff.load().then((f) => {
-      document.fonts.add(f);
-      setCustomFonts((p) => [...p.filter((x) => x.name !== name), { name, url }]);
-      flash(`Font “${name}” loaded`);
-    }).catch(() => flash("That font file could not be parsed"));
+    const reader = new FileReader();
+    reader.onload = () => {
+      const dataUrl = typeof reader.result === "string" ? reader.result : "";
+      if (!dataUrl) return flash("That font file could not be read");
+      const ff = new FontFace(name, `url(${dataUrl})`);
+      ff.load().then((f) => {
+        document.fonts.add(f);
+        setCustomFonts((p) => [...p.filter((x) => x.name !== name), { name, url: dataUrl, dataUrl }]);
+        flash(`Font “${name}” loaded`);
+      }).catch(() => flash("That font file could not be parsed"));
+    };
+    reader.readAsDataURL(file);
   }
 
   // ---- playback loop ----
@@ -449,37 +579,14 @@ export default function CaptionEditor() {
 
   async function autoGenerate(srtText?: string) {
     const preset = resolvedAutoPreset;
-    let raw: { start: number; end: number; text: string }[] = [];
+    let raw: { start: number; end: number; text: string; words?: SubtitleWord[] }[] = [];
 
     if (srtText) {
-      // Real captions from an imported SRT/VTT file.
       raw = parseSubs(srtText);
-    } else if (video) {
-      // STATIC BUILD: there is no server to run speech-to-text. Real in-browser
-      // transcription (Whisper via Transformers.js / WebGPU) is a separate
-      // feature. For now Auto-Generate lays out evenly-timed placeholder
-      // segments so you can dial in the preset look, then edit the text or
-      // import an SRT for real wording. This is deliberately NOT presented as
-      // a transcription of the actual audio.
-      setTranscribing(true);
-      setTranscribeError(
-        "Auto-Generate created evenly-timed placeholder captions to preview your preset. Edit the text, or import an SRT/VTT for real wording. (In-browser speech-to-text is a planned addition.)"
-      );
-      const sample =
-        "edit this caption or import an srt for the real words this preview is timed across your clip so you can confirm the preset look"
-          .split(" ");
-      const per = preset.style.wordsPerSubtitle || 5;
-      const count = Math.max(1, Math.floor(video.duration / 2.2));
-      for (let i = 0; i < count; i++) {
-        const chunk: string[] = [];
-        for (let k = 0; k < per; k++) chunk.push(sample[(i * per + k) % sample.length]);
-        raw.push({ start: i * 2.2, end: i * 2.2 + 2.0, text: chunk.join(" ") });
-      }
-      setTranscribing(false);
     }
 
     if (!raw.length) {
-      flash("Upload a video or import an SRT first");
+      flash(srtText ? "No valid subtitle cues were found" : "Upload a video first");
       return;
     }
     pushHistory(segments);
@@ -488,6 +595,176 @@ export default function CaptionEditor() {
     );
     setAutoOpen(false);
     flash(`Generated ${raw.length} captions with "${preset.name}"`);
+  }
+
+  function updateTranscriptionStage(stage: TranscriptionStage, status: StageStatus, detail: string) {
+    setTranscription((current) => ({
+      ...current,
+      stage,
+      detail,
+      stages: { ...current.stages, [stage]: status },
+    }));
+  }
+
+  async function prepareAudio(file: File): Promise<Float32Array> {
+    updateTranscriptionStage("audio", "active", "Decoding the uploaded video's audio track");
+    const context = new AudioContext();
+    let decoded: AudioBuffer;
+    try {
+      decoded = await context.decodeAudioData(await file.arrayBuffer());
+    } catch {
+      throw new Error("Audio extraction failed. This browser cannot decode the video's audio track.");
+    } finally {
+      await context.close();
+    }
+    if (!decoded.length || decoded.duration <= 0) throw new Error("No decodable audio track was found.");
+    updateTranscriptionStage("audio", "complete", `Extracted ${decoded.duration.toFixed(1)} seconds of audio`);
+
+    updateTranscriptionStage("preparation", "active", "Converting audio to mono 16 kHz");
+    const length = Math.max(1, Math.ceil(decoded.duration * 16_000));
+    const offline = new OfflineAudioContext(1, length, 16_000);
+    const source = offline.createBufferSource();
+    source.buffer = decoded;
+    source.connect(offline.destination);
+    source.start();
+    const rendered = await offline.startRendering();
+    const mono = new Float32Array(rendered.getChannelData(0));
+    if (!mono.some((sample) => Math.abs(sample) > 0.0001)) {
+      throw new Error("No speech or audible signal was detected in the audio track.");
+    }
+    updateTranscriptionStage("preparation", "complete", "Audio prepared for Whisper");
+    return mono;
+  }
+
+  async function startTranscription(forceReload = false) {
+    if (!video || transcribing) return;
+    setTranscribing(true);
+    setTranscribeError(null);
+    setLastTranscriptionFailed(false);
+    setTranscription({
+      stage: "audio",
+      stages: {
+        model: "pending",
+        audio: "active",
+        preparation: "pending",
+        transcription: "pending",
+        subtitles: "pending",
+      },
+      modelProgress: null,
+      detail: "Reading the uploaded video",
+      partialText: "",
+      device: "wasm",
+    });
+
+    try {
+      const audio = await prepareAudio(video.file);
+      if (!transcriptionWorkerRef.current) {
+        transcriptionWorkerRef.current = new Worker(asset("/transcription.worker.mjs"), { type: "module" });
+      }
+      const worker = transcriptionWorkerRef.current;
+      const result = await new Promise<{ chunks: { text: string; timestamp?: [number | null, number | null] }[]; text: string; device: "webgpu" | "wasm" }>((resolve, reject) => {
+        transcriptionRejectRef.current = reject;
+        worker.onmessage = (event) => {
+          const message = event.data;
+          if (message.type === "stage") {
+            updateTranscriptionStage(message.stage, message.status, message.detail || "");
+          } else if (message.type === "model-progress") {
+            setTranscription((current) => ({
+              ...current,
+              stage: "model",
+              detail: message.file ? `Downloading ${message.file}` : "Downloading AI model",
+              modelProgress: typeof message.progress === "number" ? message.progress : null,
+            }));
+          } else if (message.type === "transcription-progress") {
+            setTranscription((current) => ({
+              ...current,
+              stage: "transcription",
+              detail: message.timestamp
+                ? `Recognising speech near ${fmt(message.timestamp[0] || 0)}`
+                : "Recognising speech",
+              partialText: message.text || current.partialText,
+            }));
+          } else if (message.type === "device-fallback") {
+            setTranscription((current) => ({ ...current, detail: message.detail, device: "wasm" }));
+          } else if (message.type === "result") {
+            transcriptionRejectRef.current = null;
+            resolve(message);
+          } else if (message.type === "cancelled") {
+            reject(new DOMException("Transcription cancelled", "AbortError"));
+          } else if (message.type === "error") {
+            reject(new Error(message.message));
+          }
+        };
+        worker.onerror = () => reject(new Error("The transcription worker could not start."));
+        worker.postMessage({
+          type: "transcribe",
+          audio,
+          model: transcriptionModel,
+          language,
+          device: preferWebGpu && "gpu" in navigator ? "webgpu" : "wasm",
+          allowFallback: true,
+          forceReload,
+        }, [audio.buffer]);
+      });
+
+      updateTranscriptionStage("subtitles", "active", "Creating readable subtitle phrases");
+      const raw = createSubtitleSegments(result.chunks, {
+        maxWords: resolvedAutoPreset.style.wordsPerSubtitle || 7,
+        maxDuration: 4.5,
+        maxChars: 72,
+      });
+      if (!raw.length || !result.text.trim()) {
+        throw new Error("No speech was detected. Try a clearer audio track or select the correct language.");
+      }
+      const normalized = raw.map((segment, index) => ({
+        ...segment,
+        start: index === 0 ? Math.max(0, segment.start) : Math.max(raw[index - 1].end, segment.start),
+      })).filter((segment) => segment.end > segment.start);
+      pushHistory(segments);
+      setSegments(normalized.map((segment) => ({
+        ...segment,
+        id: uid(),
+        presetId: resolvedAutoPreset.id,
+        styleOverride: null,
+      })));
+      setSelectedSeg(null);
+      setTranscription((current) => ({
+        ...current,
+        device: result.device,
+        stage: "subtitles",
+        detail: `Created ${normalized.length} editable subtitles`,
+        stages: { ...current.stages, subtitles: "complete" },
+      }));
+      flash(`Generated ${normalized.length} subtitles with “${resolvedAutoPreset.name}”`);
+    } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") {
+        setTranscribeError("Transcription cancelled.");
+      } else {
+        setLastTranscriptionFailed(true);
+        setTranscribeError(error instanceof Error ? error.message : "Transcription failed.");
+      }
+    } finally {
+      transcriptionRejectRef.current = null;
+      setTranscribing(false);
+    }
+  }
+
+  function cancelTranscription() {
+    transcriptionWorkerRef.current?.postMessage({ type: "cancel" });
+    transcriptionWorkerRef.current?.terminate();
+    transcriptionWorkerRef.current = null;
+    transcriptionRejectRef.current?.(new DOMException("Transcription cancelled", "AbortError"));
+    transcriptionRejectRef.current = null;
+    setTranscribing(false);
+    setTranscribeError("Transcription cancelled.");
+  }
+
+  function clearSubtitles() {
+    if (!segments.length) return;
+    pushHistory(segments);
+    setSegments([]);
+    setSelectedSeg(null);
+    flash("Subtitles cleared");
   }
 
   const parseSubs = parseSubsLib;
@@ -509,21 +786,37 @@ export default function CaptionEditor() {
   };
   const splitSeg = (id: string) => {
     const s = segments.find((x) => x.id === id); if (!s) return;
-    const mid = (s.start + s.end) / 2;
     const words = s.text.split(" ");
     const h = Math.ceil(words.length / 2);
+    const firstWords = s.words?.slice(0, h);
+    const secondWords = s.words?.slice(h);
+    const mid = firstWords?.at(-1)?.end ?? secondWords?.[0]?.start ?? (s.start + s.end) / 2;
     commit([
       ...segments.filter((x) => x.id !== id),
-      { ...s, end: mid, text: words.slice(0, h).join(" ") },
-      { ...s, id: uid(), start: mid, text: words.slice(h).join(" ") },
+      { ...s, end: mid, text: words.slice(0, h).join(" "), words: firstWords },
+      { ...s, id: uid(), start: mid, text: words.slice(h).join(" "), words: secondWords },
     ].sort((a, b) => a.start - b.start));
   };
   const mergeNext = (id: string) => {
     const i = segments.findIndex((x) => x.id === id);
     if (i < 0 || i >= segments.length - 1) return;
     const a = segments[i], b = segments[i + 1];
-    commit([...segments.slice(0, i), { ...a, end: b.end, text: `${a.text} ${b.text}` }, ...segments.slice(i + 2)]);
+    commit([...segments.slice(0, i), {
+      ...a,
+      end: b.end,
+      text: `${a.text} ${b.text}`.replace(/\s+/g, " ").trim(),
+      words: a.words || b.words ? [...(a.words || []), ...(b.words || [])] : undefined,
+    }, ...segments.slice(i + 2)]);
   };
+
+  function moveSegment(id: string, direction: -1 | 1) {
+    const index = segments.findIndex((segment) => segment.id === id);
+    const target = index + direction;
+    if (index < 0 || target < 0 || target >= segments.length) return;
+    const next = [...segments];
+    [next[index], next[target]] = [next[target], next[index]];
+    commit(next);
+  }
 
   function applySearchReplace() {
     if (!search) return;
@@ -573,7 +866,15 @@ export default function CaptionEditor() {
     flash("Restored the original default preset");
   };
   function exportPreset(p: Preset) {
-    download(`${p.name.replace(/\s+/g, "-").toLowerCase()}.preset.json`, JSON.stringify({ kind: "captionforge-preset", name: p.name, style: p.style }, null, 2));
+    const customFont = p.style.customFontName
+      ? customFonts.find((font) => font.name === p.style.customFontName)
+      : null;
+    download(`${p.name.replace(/\s+/g, "-").toLowerCase()}.preset.json`, JSON.stringify({
+      kind: "captionforge-preset",
+      name: p.name,
+      style: p.style,
+      customFont: customFont?.dataUrl ? { name: customFont.name, dataUrl: customFont.dataUrl } : null,
+    }, null, 2));
   }
   function importPreset(file: File) {
     const r = new FileReader();
@@ -581,6 +882,16 @@ export default function CaptionEditor() {
       try {
         const j = JSON.parse(r.result as string);
         if (j.kind !== "captionforge-preset" || !j.style) throw 0;
+        if (j.customFont?.name && j.customFont?.dataUrl) {
+          const face = new FontFace(j.customFont.name, `url(${j.customFont.dataUrl})`);
+          face.load().then((loaded) => {
+            document.fonts.add(loaded);
+            setCustomFonts((fonts) => [
+              ...fonts.filter((font) => font.name !== j.customFont.name),
+              { name: j.customFont.name, url: j.customFont.dataUrl, dataUrl: j.customFont.dataUrl },
+            ]);
+          }).catch(() => flash("Preset imported, but its embedded font could not be loaded"));
+        }
         const p: Preset = { id: uid(), name: j.name || "Imported preset", builtin: false, style: { ...ORIGINAL_DEFAULT, ...j.style } };
         setPresets((ps) => [...ps, p]); setActivePresetId(p.id); flash(`Imported “${p.name}”`);
       } catch { flash("That file isn’t a valid CaptionForge preset"); }
@@ -619,7 +930,6 @@ export default function CaptionEditor() {
   const [renderError, setRenderError] = useState<string | null>(null);
   const [renderProgress, setRenderProgress] = useState(0);
   const [renderStatus, setRenderStatus] = useState("");
-  const [renderedVideoUrl, setRenderedVideoUrl] = useState<string | null>(null);
   const cancelRenderRef = useRef(false);
   const renderedVideoUrlRef = useRef<string | null>(null);
 
@@ -704,16 +1014,21 @@ export default function CaptionEditor() {
         ctx.strokeText(line, anchorX, y);
       }
       // fill (with per-word highlight for word/karaoke animations)
-      const isHL = style.animation === "wordHighlight" || style.animation === "karaoke";
+      const isHL = ["wordHighlight", "karaoke", "pop", "bounce", "fade", "zoom"].includes(style.animation) && !!seg.words?.length;
       if (isHL && lines.length === 1) {
         const words = line.split(/\s+/);
-        const dur = Math.max(0.001, seg.end - seg.start);
-        const active = Math.floor(clamp((t - seg.start) / dur, 0, 1) * words.length);
+        const active = activeWordIndex(seg, t, words.length);
         let penX = style.align === "center" ? anchorX - ctx.measureText(line).width / 2 : anchorX;
         const prevAlign = ctx.textAlign;
         ctx.textAlign = "left";
         words.forEach((w, wi) => {
-          ctx.fillStyle = wi <= active ? style.highlightColor : style.color;
+          const highlighted = style.animation === "karaoke" ? wi <= active : wi === active;
+          if (highlighted && style.highlightBg !== "transparent") {
+            const metrics = ctx.measureText(w);
+            ctx.fillStyle = style.highlightBg;
+            ctx.fillRect(penX - 2, y - fontPx * 0.52, metrics.width + 4, fontPx * 1.04);
+          }
+          ctx.fillStyle = highlighted ? style.highlightColor : style.color;
           ctx.fillText(w, penX, y);
           penX += ctx.measureText(w + " ").width;
         });
@@ -792,7 +1107,6 @@ export default function CaptionEditor() {
         if (renderedVideoUrlRef.current) URL.revokeObjectURL(renderedVideoUrlRef.current);
         const url = URL.createObjectURL(blob);
         renderedVideoUrlRef.current = url;
-        setRenderedVideoUrl(url);
         const a = document.createElement("a");
         a.href = url;
         a.download = "captionforge.mp4";
@@ -1127,7 +1441,7 @@ export default function CaptionEditor() {
           {/* Auto-generate + preset dropdown */}
           <div style={{ position: "relative" }}>
             <div style={{ display: "flex", alignItems: "stretch", borderRadius: 10, overflow: "hidden", border: `1px solid ${C.amber}` }}>
-              <button onClick={() => autoGenerate()} disabled={!video || transcribing} style={{
+              <button onClick={() => setTranscriptionOpen(true)} disabled={!video || transcribing} style={{
                 display: "flex", alignItems: "center", gap: 7, padding: "9px 14px", background: C.amber,
                 border: "none", color: "#1a1300", fontWeight: 700, fontSize: 13, cursor: (video && !transcribing) ? "pointer" : "not-allowed", opacity: (video && !transcribing) ? 1 : 0.5,
               }}>
@@ -1193,6 +1507,7 @@ export default function CaptionEditor() {
             <div style={{ display: "flex", gap: 6, padding: "8px 14px", borderBottom: `1px solid ${C.line}` }}>
               <Btn onClick={undo} title="Undo"><RotateCcw size={13} /></Btn>
               <Btn onClick={redo} title="Redo" style={{ transform: "scaleX(-1)" }}><RotateCcw size={13} /></Btn>
+              <Btn onClick={clearSubtitles} disabled={!segments.length} title="Clear all subtitles"><Trash2 size={13} /> Clear</Btn>
               <div style={{ flex: 1 }} />
               <Btn onClick={exportSRT} title="Export SRT"><FileDown size={13} /> SRT</Btn>
               <label><Btn title="Import SRT/VTT"><FileUp size={13} /></Btn>
@@ -1219,9 +1534,28 @@ export default function CaptionEditor() {
                     }}>
                     <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 6 }}>
                       <span style={{ fontSize: 10.5, fontWeight: 700, color: C.faint, fontVariantNumeric: "tabular-nums" }}>#{i + 1}</span>
-                      <input value={fmt(s.start)} readOnly style={timeChip()} title="Start" />
+                      <input defaultValue={fmt(s.start)} key={`start-${s.id}-${s.start}`}
+                        onClick={(e) => e.stopPropagation()}
+                        onBlur={(e) => {
+                          const value = parseEditorTime(e.target.value);
+                          if (value == null || value >= s.end) {
+                            e.target.value = fmt(s.start);
+                            flash("Start time must be before the end time");
+                          } else updateSeg(s.id, { start: value, words: undefined });
+                        }}
+                        style={timeChip()} title="Editable start time (MM:SS.ss)" />
                       <span style={{ color: C.faint }}>→</span>
-                      <input value={fmt(s.end)} readOnly style={timeChip()} title="End" />
+                      <input defaultValue={fmt(s.end)} key={`end-${s.id}-${s.end}`}
+                        onClick={(e) => e.stopPropagation()}
+                        onBlur={(e) => {
+                          const value = parseEditorTime(e.target.value);
+                          const nextStart = segments[i + 1]?.start;
+                          if (value == null || value <= s.start || (nextStart != null && value > nextStart)) {
+                            e.target.value = fmt(s.end);
+                            flash("End time must be after start and cannot overlap the next subtitle");
+                          } else updateSeg(s.id, { end: value, words: undefined });
+                        }}
+                        style={timeChip()} title="Editable end time (MM:SS.ss)" />
                       {overridden && <span title="Custom style on this caption" style={{ marginLeft: "auto", fontSize: 9.5, color: C.mint, fontWeight: 700, border: `1px solid ${hexA(C.mint,0.4)}`, borderRadius: 5, padding: "1px 5px" }}>EDITED</span>}
                     </div>
                     <textarea value={s.text} onChange={(e) => editText(s.id, e.target.value)} onClick={(e) => e.stopPropagation()} rows={2}
@@ -1231,6 +1565,8 @@ export default function CaptionEditor() {
                       <MiniBtn onClick={(e) => { e.stopPropagation(); splitSeg(s.id); }} icon={<Split size={12} />} title="Split" />
                       <MiniBtn onClick={(e) => { e.stopPropagation(); mergeNext(s.id); }} icon={<Merge size={12} />} title="Merge next" />
                       <MiniBtn onClick={(e) => { e.stopPropagation(); dupSeg(s.id); }} icon={<Copy size={12} />} title="Duplicate" />
+                      <MiniBtn onClick={(e) => { e.stopPropagation(); moveSegment(s.id, -1); }} icon={<ChevronUp size={12} />} title="Move up" />
+                      <MiniBtn onClick={(e) => { e.stopPropagation(); moveSegment(s.id, 1); }} icon={<MoveDown size={12} />} title="Move down" />
                       <div style={{ flex: 1 }} />
                       <MiniBtn onClick={(e) => { e.stopPropagation(); delSeg(s.id); }} icon={<Trash2 size={12} />} title="Delete" danger />
                     </div>
@@ -1355,6 +1691,7 @@ export default function CaptionEditor() {
                 <Btn onClick={newPreset}><Plus size={12} /> New</Btn>
                 <Btn onClick={dupPreset}><Copy size={12} /> Duplicate</Btn>
                 <Btn onClick={() => setRenameId(activePresetId)}><Pencil size={12} /> Rename</Btn>
+                <Btn onClick={() => flash(`Updated “${activePreset.name}”`)}><Check size={12} /> Update</Btn>
                 <Btn kind="danger" onClick={() => delPreset(activePresetId)}><Trash2 size={12} /> Delete</Btn>
               </div>
               <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 10 }}>
@@ -1452,6 +1789,16 @@ export default function CaptionEditor() {
               </div>
               <Field label="X position" hint={`${styleP.x}%`}><Slide value={styleP.x} min={0} max={100} onChange={(v) => setS({ x: v })} /></Field>
               <Field label="Y position" hint={`${styleP.y}%`}><Slide value={styleP.y} min={0} max={100} onChange={(v) => setS({ y: v })} /></Field>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                <Field label="Exact X (%)">
+                  <input type="number" min={0} max={100} step={0.1} value={styleP.x}
+                    onChange={(e) => setS({ x: clamp(Number(e.target.value), 0, 100) })} style={inp()} />
+                </Field>
+                <Field label="Exact Y (%)">
+                  <input type="number" min={0} max={100} step={0.1} value={styleP.y}
+                    onChange={(e) => setS({ y: clamp(Number(e.target.value), 0, 100) })} style={inp()} />
+                </Field>
+              </div>
               <Field label="Max width" hint={`${styleP.maxWidthPct}%`}><Slide value={styleP.maxWidthPct} min={20} max={100} onChange={(v) => setS({ maxWidthPct: v })} /></Field>
               <div style={{ display: "flex", gap: 6 }}>
                 <Btn onClick={() => setS({ x: 50 })}><Crosshair size={12} /> Centre X</Btn>
@@ -1466,6 +1813,99 @@ export default function CaptionEditor() {
         </div>
       </div>
 
+      {transcriptionOpen && (
+        <div role="dialog" aria-modal="true" aria-label="Automatic subtitle transcription"
+          style={{ position: "fixed", inset: 0, zIndex: 120, background: "rgba(6,5,10,.78)", display: "grid", placeItems: "center", padding: 20 }}>
+          <div style={{ width: "min(620px, 96vw)", maxHeight: "92vh", overflow: "auto", background: C.panel, border: `1px solid ${C.line2}`, borderRadius: 16, boxShadow: "0 28px 90px rgba(0,0,0,.65)" }}>
+            <div style={{ padding: "16px 18px", display: "flex", alignItems: "center", gap: 10, borderBottom: `1px solid ${C.line}` }}>
+              <Wand2 size={18} color={C.amber} />
+              <div style={{ flex: 1 }}>
+                <div style={{ fontWeight: 800 }}>Automatic subtitles</div>
+                <div style={{ color: C.dim, fontSize: 11.5, marginTop: 2 }}>Audio stays on this device. Models are cached by the browser.</div>
+              </div>
+              <Btn onClick={() => !transcribing && setTranscriptionOpen(false)} disabled={transcribing}><X size={14} /></Btn>
+            </div>
+
+            <div style={{ padding: 18, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
+              <Field label="Language">
+                <select value={language} onChange={(e) => setLanguage(e.target.value)} disabled={transcribing} style={selS()}>
+                  <option value="auto">Auto-detect language</option>
+                  <option value="english">English</option>
+                  <option value="spanish">Spanish</option>
+                  <option value="french">French</option>
+                  <option value="german">German</option>
+                  <option value="italian">Italian</option>
+                  <option value="portuguese">Portuguese</option>
+                  <option value="dutch">Dutch</option>
+                  <option value="polish">Polish</option>
+                  <option value="hindi">Hindi</option>
+                  <option value="japanese">Japanese</option>
+                  <option value="korean">Korean</option>
+                  <option value="chinese">Chinese</option>
+                </select>
+              </Field>
+              <Field label="Subtitle preset">
+                <select value={autoChoiceId} onChange={(e) => setAutoChoiceId(e.target.value)} disabled={transcribing} style={selS()}>
+                  <option value="__default__">Use my default preset</option>
+                  {presets.map((preset) => <option key={preset.id} value={preset.id}>{preset.name}</option>)}
+                </select>
+              </Field>
+            </div>
+
+            <div style={{ padding: "0 18px 16px" }}>
+              <div style={{ fontSize: 11, color: C.dim, fontWeight: 700, textTransform: "uppercase", marginBottom: 7 }}>Model quality</div>
+              <Seg
+                options={[["fast", "Fast"], ["balanced", "Balanced"], ["accurate", "Accurate"]]}
+                value={transcriptionModel}
+                onChange={(value) => !transcribing && setTranscriptionModel(value as TranscriptionModel)}
+              />
+              <div style={{ color: C.faint, fontSize: 11.5, marginTop: 7 }}>
+                {transcriptionModel === "fast" && "Smallest download and lowest memory use."}
+                {transcriptionModel === "balanced" && "Recommended quality and speed for most devices."}
+                {transcriptionModel === "accurate" && "Largest model; may exceed memory on phones or low-memory computers."}
+              </div>
+            </div>
+
+            <div style={{ padding: "0 18px 16px" }}>
+              <Toggle on={preferWebGpu} onChange={(value) => !transcribing && setPreferWebGpu(value)} label="Prefer WebGPU (automatically fall back to CPU/WASM)" />
+            </div>
+
+            {(transcribing || transcription.stage || transcribeError) && (
+              <div style={{ margin: "0 18px 16px", background: C.bg2, border: `1px solid ${transcribeError ? "#6a2838" : C.line}`, borderRadius: 12, padding: 12 }}>
+                {(["audio", "preparation", "model", "transcription", "subtitles"] as TranscriptionStage[]).map((stage) => {
+                  const labels: Record<TranscriptionStage, string> = {
+                    audio: "Audio extraction",
+                    preparation: "Audio preparation",
+                    model: "AI model download",
+                    transcription: "Transcription",
+                    subtitles: "Subtitle creation",
+                  };
+                  const status = transcription.stages[stage];
+                  return (
+                    <div key={stage} style={{ display: "flex", alignItems: "center", gap: 9, padding: "5px 0", color: status === "complete" ? C.mint : status === "active" ? C.text : C.faint }}>
+                      <span style={{ width: 18 }}>{status === "complete" ? <Check size={15} /> : status === "active" ? <RefreshCw className="cf-spin" size={14} /> : "○"}</span>
+                      <span style={{ flex: 1, fontSize: 12.5 }}>{labels[stage]}</span>
+                      {stage === "model" && status === "active" && transcription.modelProgress != null && <span style={{ fontSize: 11 }}>{transcription.modelProgress}%</span>}
+                    </div>
+                  );
+                })}
+                {transcription.detail && <div style={{ color: C.dim, fontSize: 11.5, borderTop: `1px solid ${C.line}`, marginTop: 6, paddingTop: 8 }}>{transcription.detail}</div>}
+                {transcription.partialText && <div style={{ color: C.faint, fontSize: 11.5, marginTop: 6, fontStyle: "italic" }}>{transcription.partialText}</div>}
+                {transcribeError && <div role="alert" style={{ color: "#ff8fa5", fontSize: 12.5, marginTop: 8 }}>{transcribeError}</div>}
+              </div>
+            )}
+
+            <div style={{ padding: "0 18px 18px", display: "flex", gap: 8, justifyContent: "flex-end" }}>
+              <Btn onClick={clearSubtitles} disabled={!segments.length || transcribing}><Trash2 size={13} /> Clear subtitles</Btn>
+              {lastTranscriptionFailed && !transcribing && <Btn onClick={() => startTranscription(true)}><RefreshCw size={13} /> Retry</Btn>}
+              {transcribing
+                ? <Btn kind="danger" onClick={cancelTranscription}><X size={13} /> Cancel transcription</Btn>
+                : <Btn kind="solid" onClick={() => startTranscription(false)} disabled={!video}><Wand2 size={14} /> Start transcription</Btn>}
+            </div>
+          </div>
+        </div>
+      )}
+
       {rendering && renderStatus && (
         <div style={{ position: "fixed", top: 64, left: "50%", transform: "translateX(-50%)", background: hexA("#0a1a2a", 0.92), border: `1px solid ${C.blue}`, color: C.text, padding: "9px 16px", borderRadius: 10, fontSize: 12.5, zIndex: 89, maxWidth: 600, textAlign: "center" }}>
           {renderStatus} {renderProgress > 0 ? `(${renderProgress}%)` : ""}
@@ -1475,15 +1915,6 @@ export default function CaptionEditor() {
         <div style={{ position: "fixed", top: 64, left: "50%", transform: "translateX(-50%)", background: hexA("#3a1018", 0.92), border: `1px solid ${C.pink}`, color: C.text, padding: "9px 16px", borderRadius: 10, fontSize: 12.5, zIndex: 89, maxWidth: 600, textAlign: "center" }}>
           {renderError}
         </div>
-      )}
-      {renderedVideoUrl && !rendering && (
-        <a
-          href={renderedVideoUrl}
-          download="captionforge.mp4"
-          style={{ position: "fixed", top: renderError ? 110 : 64, left: "50%", transform: "translateX(-50%)", background: C.amber, color: "#1a1300", padding: "10px 18px", borderRadius: 10, fontSize: 13, fontWeight: 800, zIndex: 90, textDecoration: "none", boxShadow: "0 12px 36px rgba(0,0,0,.45)" }}
-        >
-          Download captionforge.mp4
-        </a>
       )}
       {transcribeError && (
         <div style={{ position: "fixed", top: 64, left: "50%", transform: "translateX(-50%)", background: hexA("#000", 0.85), border: `1px solid ${C.line2}`, color: C.dim, padding: "9px 16px", borderRadius: 10, fontSize: 12.5, zIndex: 89, maxWidth: 560, textAlign: "center" }}>
@@ -1548,6 +1979,12 @@ textarea:focus, input:focus, select:focus { border-color: ${C.amber} !important;
 @keyframes cf-bounce { 0% { transform: translate(-50%,20%); opacity:0 } 60% { transform: translate(-50%,-58%) } 100% { transform: translate(-50%,-50%); opacity:1 } }
 @keyframes cf-zoom { from { transform: translate(-50%,-50%) scale(1.8); opacity:0 } to { transform: translate(-50%,-50%) scale(1); opacity:1 } }
 @keyframes cf-slideUp { from { transform: translate(-50%,10%); opacity:0 } to { transform: translate(-50%,-50%); opacity:1 } }
+@keyframes cf-spin { to { transform: rotate(360deg) } }
+@keyframes cf-word-pop { from { transform: scale(.72); opacity:.45 } to { transform: scale(1); opacity:1 } }
+@keyframes cf-word-bounce { 0% { transform: translateY(20%) } 65% { transform: translateY(-18%) } 100% { transform: translateY(0) } }
+@keyframes cf-word-zoom { from { transform: scale(1.35); opacity:.5 } to { transform: scale(1); opacity:1 } }
+@keyframes cf-word-fade { from { opacity:.25 } to { opacity:1 } }
+.cf-spin { animation: cf-spin .8s linear infinite; }
 .cf-anim-fade { animation: cf-fade .35s ease both; }
 .cf-anim-pop { animation: cf-pop .4s cubic-bezier(.3,1.5,.5,1) both; }
 .cf-anim-bounce { animation: cf-bounce .5s cubic-bezier(.3,1.4,.5,1) both; }

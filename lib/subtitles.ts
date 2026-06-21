@@ -44,8 +44,20 @@ export interface Segment {
   start: number;
   end: number;
   text: string;
+  words?: SubtitleWord[];
   presetId: string;
   styleOverride: Partial<SubtitleStyle> | null;
+}
+
+export interface SubtitleWord {
+  text: string;
+  start: number;
+  end: number;
+}
+
+export interface TranscriptChunk {
+  text: string;
+  timestamp?: [number | null, number | null];
 }
 
 export const ORIGINAL_DEFAULT: SubtitleStyle = {
@@ -141,7 +153,7 @@ export function styleFor(seg: Segment, presets: Preset[], defaultId: string): Su
 
 /** Apply a chosen preset to every generated segment (auto-generate behaviour). */
 export function applyPresetToSegments(
-  raw: { start: number; end: number; text: string }[],
+  raw: { start: number; end: number; text: string; words?: SubtitleWord[] }[],
   presetId: string,
   makeId: () => string
 ): Segment[] {
@@ -150,6 +162,7 @@ export function applyPresetToSegments(
     start: r.start,
     end: r.end,
     text: r.text,
+    words: r.words,
     presetId,
     styleOverride: null,
   }));
@@ -168,5 +181,78 @@ export function splitSegment(seg: Segment, makeId: () => string): Segment[] {
 
 /** Merge a segment with the next one (merge-with-next button). */
 export function mergeSegments(a: Segment, b: Segment): Segment {
-  return { ...a, end: b.end, text: `${a.text} ${b.text}` };
+  return {
+    ...a,
+    end: b.end,
+    text: `${a.text} ${b.text}`.replace(/\s+/g, " ").trim(),
+    words: a.words || b.words ? [...(a.words || []), ...(b.words || [])] : undefined,
+  };
+}
+
+/**
+ * Converts Whisper word timestamps into readable, ordered subtitle cues.
+ * Boundaries prefer punctuation and pauses, while hard limits prevent long
+ * blocks and invalid/overlapping timings.
+ */
+export function createSubtitleSegments(
+  chunks: TranscriptChunk[],
+  options: { maxWords: number; maxDuration: number; maxChars?: number } = {
+    maxWords: 7,
+    maxDuration: 4.5,
+    maxChars: 72,
+  }
+): { start: number; end: number; text: string; words: SubtitleWord[] }[] {
+  const maxWords = Math.max(1, options.maxWords);
+  const maxDuration = Math.max(0.5, options.maxDuration);
+  const maxChars = Math.max(12, options.maxChars ?? 72);
+  const words: SubtitleWord[] = [];
+  let fallbackStart = 0;
+
+  for (const chunk of chunks) {
+    const text = chunk.text.trim();
+    if (!text) continue;
+    const start = Math.max(fallbackStart, chunk.timestamp?.[0] ?? fallbackStart);
+    const estimatedDuration = Math.max(0.18, text.replace(/\s+/g, "").length * 0.055);
+    const end = Math.max(start + 0.08, chunk.timestamp?.[1] ?? start + estimatedDuration);
+    words.push({ text, start, end });
+    fallbackStart = end;
+  }
+
+  const out: { start: number; end: number; text: string; words: SubtitleWord[] }[] = [];
+  let current: SubtitleWord[] = [];
+
+  const flush = () => {
+    if (!current.length) return;
+    const previousEnd = out.at(-1)?.end ?? 0;
+    const start = Math.max(previousEnd, current[0].start);
+    const end = Math.max(start + 0.08, current.at(-1)?.end ?? start + 0.08);
+    const text = current.map((word) => word.text).join(" ").replace(/\s+([,.!?;:])/g, "$1").trim();
+    if (text) out.push({ start, end, text, words: current.map((word) => ({ ...word })) });
+    current = [];
+  };
+
+  for (let i = 0; i < words.length; i++) {
+    const word = words[i];
+    const previous = current.at(-1);
+    const candidate = [...current, word];
+    const candidateText = candidate.map((item) => item.text).join(" ");
+    const duration = word.end - candidate[0].start;
+    const pauseBefore = previous ? word.start - previous.end : 0;
+    const previousEndsPhrase = previous ? /[.!?;:]$/.test(previous.text) : false;
+
+    if (
+      current.length > 0 &&
+      (pauseBefore >= 0.65 ||
+        previousEndsPhrase ||
+        candidate.length > maxWords ||
+        duration > maxDuration ||
+        candidateText.length > maxChars)
+    ) {
+      flush();
+    }
+    current.push(word);
+  }
+  flush();
+
+  return out.filter((segment) => segment.end > segment.start && segment.text.length > 0);
 }
