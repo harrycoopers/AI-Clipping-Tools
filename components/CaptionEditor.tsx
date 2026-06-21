@@ -1,5 +1,5 @@
 "use client";
- 
+
 import React, { useState, useRef, useEffect, useCallback, useMemo } from "react";
 import {
   Upload, Play, Pause, Wand2, ChevronDown, Plus, Copy, Trash2, Split,
@@ -11,20 +11,20 @@ import {
   ORIGINAL_DEFAULT, applyCaps, srtTime, parseSubs as parseSubsLib,
   clamp, type SubtitleStyle, type Preset, type Segment,
 } from "@/lib/subtitles";
- 
+
 /* ---------------------------------------------------------------------------
    CaptionForge — auto-subtitle preset system + working caption editor core.
- 
+
    Persistence note: this single-file build runs inside an in-chat preview that
    blocks browser storage, so presets live in React state and persist via the
    Export/Import JSON buttons. In the Next.js app, swap `usePresetStore` for the
    localStorage/IndexedDB adapter described in the notes — the shape is identical.
 --------------------------------------------------------------------------- */
- 
- 
- 
- 
- 
+
+
+
+
+
 interface VideoMeta {
   url: string;
   name: string;
@@ -33,12 +33,12 @@ interface VideoMeta {
   w: number;
   h: number;
 }
- 
+
 interface CustomFont {
   name: string;
   url: string;
 }
- 
+
 const C = {
   bg: "#13111C",
   bg2: "#1A1724",
@@ -54,16 +54,16 @@ const C = {
   mint: "#46E5C8",
   blue: "#7C9DFF",
 };
- 
+
 const FONTS = [
   "Komika Axis", "Montserrat ExtraBold",
   "Inter", "Poppins", "Montserrat", "Bebas Neue", "Anton",
   "Archivo Black", "Space Grotesk", "Roboto", "Oswald", "Arial",
 ];
- 
+
 // ---- The built-in original default preset (per spec) -----------------------
- 
- 
+
+
 const PRESET_LIBRARY: { name: string; style: SubtitleStyle }[] = [
   { name: "Shorts Style", style: { ...ORIGINAL_DEFAULT, fontFamily: "Bebas Neue", fontSizePct: 7, color: "#FFFFFF", highlightColor: "#FFCA3A", animation: "karaoke", y: 70, caps: "upper", wordsPerSubtitle: 4 } },
   { name: "Clean White", style: { ...ORIGINAL_DEFAULT, fontFamily: "Inter", fontSizePct: 5, bold: true, outlineWidthPct: 4, animation: "fade", caps: "none", y: 86 } },
@@ -72,15 +72,15 @@ const PRESET_LIBRARY: { name: string; style: SubtitleStyle }[] = [
   { name: "Bold Viral", style: { ...ORIGINAL_DEFAULT, fontFamily: "Anton", fontSizePct: 7.4, color: "#FFFFFF", highlightColor: "#FFCA3A", highlightBg: "#000000", outlineWidthPct: 8, animation: "wordHighlight", caps: "upper", y: 72 } },
   { name: "Custom Brand Style", style: { ...ORIGINAL_DEFAULT, fontFamily: "Space Grotesk", color: "#FFCA3A", outlineColor: "#13111C", highlightColor: "#46E5C8", animation: "zoom", caps: "upper", y: 78 } },
 ];
- 
+
 const ANIMATIONS = ["none", "fade", "pop", "bounce", "zoom", "slideUp", "wordHighlight", "karaoke"];
 const CAPS: [SubtitleStyle["caps"], string][] = [["none", "Aa"], ["upper", "AA"], ["lower", "aa"], ["title", "Ab"]];
 const POS_PRESETS: [string, number, number][] = [["Top", 50, 12], ["Centre", 50, 50], ["Lower third", 50, 70], ["Bottom", 50, 84]];
- 
+
 const uid = () => Math.random().toString(36).slice(2, 10);
- 
- 
- 
+
+
+
 // Build a thick, solid outline from layered text-shadows (matches the viral look
 // far better than -webkit-text-stroke, and is reproducible in FFmpeg drawtext).
 function outlineShadow(px: number, color: string, opacity: number) {
@@ -95,7 +95,7 @@ function outlineShadow(px: number, color: string, opacity: number) {
   }
   return steps.join(", ");
 }
- 
+
 function hexA(hex: string, a: number) {
   if (hex === "transparent") return "transparent";
   const m = hex.replace("#", "");
@@ -103,7 +103,7 @@ function hexA(hex: string, a: number) {
   const r = parseInt(f.slice(0, 2), 16), g = parseInt(f.slice(2, 4), 16), b = parseInt(f.slice(4, 6), 16);
   return `rgba(${r},${g},${b},${a})`;
 }
- 
+
 function fmt(t: number) {
   if (!isFinite(t)) t = 0;
   const m = Math.floor(t / 60);
@@ -111,9 +111,9 @@ function fmt(t: number) {
   const cs = Math.floor((t % 1) * 100);
   return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}.${String(cs).padStart(2, "0")}`;
 }
- 
- 
- 
+
+
+
 // ===========================================================================
 //  Subtitle rendering on the preview overlay
 // ===========================================================================
@@ -128,14 +128,14 @@ function CaptionLayer({ seg, style, previewH, currentTime, dragging }: {
   const dur = Math.max(0.001, seg.end - seg.start);
   const prog = clamp((currentTime - seg.start) / dur, 0, 1);
   const activeWord = Math.floor(prog * words.length);
- 
+
   const shadows: string[] = [];
   const ol = outlineShadow(outlinePx, style.outlineColor, style.outlineOpacity);
   if (ol) shadows.push(ol);
   if (style.shadowBlur > 0 || style.shadowDistance > 0)
     shadows.push(`${style.shadowDistance}px ${style.shadowDistance}px ${style.shadowBlur}px ${hexA(style.shadowColor, style.shadowOpacity)}`);
- 
- 
+
+
   const textStyle = {
     fontFamily: `'${style.customFontName || style.fontFamily}', sans-serif`,
     fontSize: fontPx,
@@ -149,9 +149,9 @@ function CaptionLayer({ seg, style, previewH, currentTime, dragging }: {
     margin: 0,
     WebkitFontSmoothing: "antialiased",
   };
- 
+
   const animClass = !isHL && style.animation !== "none" ? `cf-anim-${style.animation}` : "";
- 
+
   return (
     <div
       style={{
@@ -189,7 +189,7 @@ function CaptionLayer({ seg, style, previewH, currentTime, dragging }: {
     </div>
   );
 }
- 
+
 // Tiny live sample used on each preset chip
 function PresetThumb({ style }: { style: SubtitleStyle }) {
   const fontPx = 18;
@@ -219,7 +219,7 @@ function PresetThumb({ style }: { style: SubtitleStyle }) {
     </div>
   );
 }
- 
+
 // ===========================================================================
 //  Small UI atoms
 // ===========================================================================
@@ -239,7 +239,7 @@ const Btn = ({ children, onClick, kind = "ghost", title, disabled, style }: {
       }}>{children}</button>
   );
 };
- 
+
 const Field = ({ label, children, hint }: {
   label: string; children: React.ReactNode; hint?: React.ReactNode;
 }) => (
@@ -251,14 +251,14 @@ const Field = ({ label, children, hint }: {
     {children}
   </label>
 );
- 
+
 const Slide = ({ value, min, max, step = 1, onChange }: {
   value: number; min: number; max: number; step?: number; onChange: (v: number) => void;
 }) => (
   <input type="range" min={min} max={max} step={step} value={value} className="cf-range"
     onChange={(e) => onChange(parseFloat(e.target.value))} style={{ width: "100%" }} />
 );
- 
+
 const Color = ({ value, onChange }: { value: string; onChange: (v: string) => void }) => (
   <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
     <input type="color" value={value === "transparent" ? "#000000" : value}
@@ -268,7 +268,7 @@ const Color = ({ value, onChange }: { value: string; onChange: (v: string) => vo
       style={{ flex: 1, background: C.bg2, border: `1px solid ${C.line}`, borderRadius: 7, color: C.text, padding: "6px 8px", fontSize: 12, fontFamily: "monospace" }} />
   </div>
 );
- 
+
 const Toggle = ({ on, onChange, label }: { on: boolean; onChange: (v: boolean) => void; label: string }) => (
   <button onClick={() => onChange(!on)} style={{
     display: "flex", alignItems: "center", gap: 9, width: "100%", background: "transparent",
@@ -286,7 +286,7 @@ const Toggle = ({ on, onChange, label }: { on: boolean; onChange: (v: boolean) =
     <span style={{ textAlign: "left" }}>{label}</span>
   </button>
 );
- 
+
 const Seg = ({ options, value, onChange }: {
   options: (string | [string, React.ReactNode])[]; value: string; onChange: (v: string) => void;
 }) => (
@@ -305,7 +305,7 @@ const Seg = ({ options, value, onChange }: {
     })}
   </div>
 );
- 
+
 const Section = ({ title, icon, children, defaultOpen = true }: {
   title: string; icon: React.ReactNode; children: React.ReactNode; defaultOpen?: boolean;
 }) => {
@@ -324,7 +324,7 @@ const Section = ({ title, icon, children, defaultOpen = true }: {
     </div>
   );
 };
- 
+
 // ===========================================================================
 //  Main app
 // ===========================================================================
@@ -338,7 +338,7 @@ export default function CaptionEditor() {
   const [autoChoiceId, setAutoChoiceId] = useState("__default__"); // dropdown beside Auto-Generate
   const [activePresetId, setActivePresetId] = useState("original"); // preset being edited in the style panel
   const [applyDefaultToNew, setApplyDefaultToNew] = useState(true);
- 
+
   // ---- video + segments ----
   const [video, setVideo] = useState<VideoMeta | null>(null);
   const [segments, setSegments] = useState<Segment[]>([]);
@@ -352,7 +352,7 @@ export default function CaptionEditor() {
   const [renameId, setRenameId] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [replace, setReplace] = useState("");
- 
+
   // undo / redo
   const history = useRef<{ past: string[]; future: string[] }>({ past: [], future: [] });
   const pushHistory = useCallback((segs: Segment[]) => {
@@ -360,32 +360,32 @@ export default function CaptionEditor() {
     if (history.current.past.length > 60) history.current.past.shift();
     history.current.future = [];
   }, []);
- 
+
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const previewRef = useRef<HTMLDivElement | null>(null);
   const dragRef = useRef<{ id: string; rect: DOMRect } | null>(null);
   const [previewH, setPreviewH] = useState(360);
- 
+
   const resolvedAutoPreset = useMemo(() => {
     const id = autoChoiceId === "__default__" ? defaultId : autoChoiceId;
     return presets.find((p) => p.id === id) || presets[0];
   }, [autoChoiceId, defaultId, presets]);
- 
+
   const activePreset = presets.find((p) => p.id === activePresetId) || presets[0];
- 
+
   const flash = (m: string) => { setToast(m); setTimeout(() => setToast(null), 2200); };
- 
+
   // ---- effective style for a segment: preset baseline + per-segment override ----
   const styleFor = useCallback((seg: Segment): SubtitleStyle => {
     const base = (presets.find((p) => p.id === seg.presetId) || presets.find((p) => p.id === defaultId) || presets[0]).style;
     return { ...base, ...(seg.styleOverride || {}) };
   }, [presets, defaultId]);
- 
+
   const activeSeg = useMemo(
     () => segments.find((s) => currentTime >= s.start && currentTime < s.end),
     [segments, currentTime]
   );
- 
+
   // ---- video upload ----
   function loadVideo(file: File | undefined | null) {
     if (!file) return;
@@ -405,7 +405,7 @@ export default function CaptionEditor() {
     v.onerror = () => flash("Could not read this video file");
     v.src = url;
   }
- 
+
   // ---- custom font upload ----
   const [customFonts, setCustomFonts] = useState<CustomFont[]>([]);
   function loadFont(file: File | undefined | null) {
@@ -420,7 +420,7 @@ export default function CaptionEditor() {
       flash(`Font “${name}” loaded`);
     }).catch(() => flash("That font file could not be parsed"));
   }
- 
+
   // ---- playback loop ----
   useEffect(() => {
     let raf = 0;
@@ -433,23 +433,23 @@ export default function CaptionEditor() {
     else videoRef.current?.pause();
     return () => cancelAnimationFrame(raf);
   }, [playing]);
- 
+
   useEffect(() => {
     const ro = () => { if (previewRef.current) setPreviewH(previewRef.current.clientHeight); };
     ro(); window.addEventListener("resize", ro);
     return () => window.removeEventListener("resize", ro);
   }, [video]);
- 
+
   // ---- segment ops ----
   const commit = (next: Segment[]) => { pushHistory(segments); setSegments(next); };
- 
+
   const [transcribing, setTranscribing] = useState(false);
   const [transcribeError, setTranscribeError] = useState<string | null>(null);
- 
+
   async function autoGenerate(srtText?: string) {
     const preset = resolvedAutoPreset;
     let raw: { start: number; end: number; text: string }[] = [];
- 
+
     if (srtText) {
       // Real captions from an imported SRT/VTT file.
       raw = parseSubs(srtText);
@@ -476,7 +476,7 @@ export default function CaptionEditor() {
       }
       setTranscribing(false);
     }
- 
+
     if (!raw.length) {
       flash("Upload a video or import an SRT first");
       return;
@@ -488,12 +488,12 @@ export default function CaptionEditor() {
     setAutoOpen(false);
     flash(`Generated ${raw.length} captions with "${preset.name}"`);
   }
- 
+
   const parseSubs = parseSubsLib;
- 
+
   const updateSeg = (id: string, patch: Partial<Segment>) => commit(segments.map((s) => s.id === id ? { ...s, ...patch } : s));
   const editText = (id: string, text: string) => commit(segments.map((s) => s.id === id ? { ...s, text } : s));
- 
+
   function addSeg() {
     const start = currentTime;
     const seg: Segment = { id: uid(), start, end: start + 2, text: "New caption", presetId: applyDefaultToNew ? defaultId : activePresetId, styleOverride: null };
@@ -523,13 +523,13 @@ export default function CaptionEditor() {
     const a = segments[i], b = segments[i + 1];
     commit([...segments.slice(0, i), { ...a, end: b.end, text: `${a.text} ${b.text}` }, ...segments.slice(i + 2)]);
   };
- 
+
   function applySearchReplace() {
     if (!search) return;
     commit(segments.map((s) => ({ ...s, text: s.text.split(search).join(replace) })));
     flash(`Replaced “${search}” → “${replace}”`);
   }
- 
+
   function undo() {
     if (!history.current.past.length) return;
     history.current.future.push(JSON.stringify(segments));
@@ -540,7 +540,7 @@ export default function CaptionEditor() {
     history.current.past.push(JSON.stringify(segments));
     setSegments(JSON.parse(history.current.future.pop() as string));
   }
- 
+
   // ---- style edits write to the active preset (explicit) ----
   function patchActivePreset(patch: Partial<SubtitleStyle>) {
     setPresets((ps) => ps.map((p) => p.id === activePresetId ? { ...p, style: { ...p.style, ...patch } } : p));
@@ -549,7 +549,7 @@ export default function CaptionEditor() {
   function patchSegStyle(id: string, patch: Partial<SubtitleStyle>) {
     commit(segments.map((s) => s.id === id ? { ...s, styleOverride: { ...(s.styleOverride || {}), ...patch } } : s));
   }
- 
+
   // ---- preset lifecycle ----
   const newPreset = () => {
     const p: Preset = { id: uid(), name: "New preset", builtin: false, style: { ...activePreset.style } };
@@ -586,7 +586,7 @@ export default function CaptionEditor() {
     };
     r.readAsText(file);
   }
- 
+
   function download(name: string, text: string, type = "application/json") {
     const blob = new Blob([text], { type });
     const url = URL.createObjectURL(blob);
@@ -604,12 +604,13 @@ export default function CaptionEditor() {
       segments: segments.map(({ id: _id, ...r }) => r), video: video ? { name: video.name, duration: video.duration } : null,
     }, null, 2), "application/json");
   }
- 
+
   const [rendering, setRendering] = useState(false);
   const [renderError, setRenderError] = useState<string | null>(null);
   const [renderProgress, setRenderProgress] = useState(0);
+  const [renderStatus, setRenderStatus] = useState("");
   const cancelRenderRef = useRef(false);
- 
+
   // Word-wrap text to a max pixel width, capped at maxLines.
   function wrapLines(ctx: CanvasRenderingContext2D, text: string, maxW: number, maxLines: number): string[] {
     const words = text.split(/\s+/).filter(Boolean);
@@ -628,7 +629,7 @@ export default function CaptionEditor() {
     if (cur && lines.length < maxLines) lines.push(cur);
     return lines.length ? lines : [text];
   }
- 
+
   // Draw one caption onto the export canvas at native resolution. Uses a real
   // canvas text stroke for the outline (not a shadow), mirroring the preview.
   function drawCaptionToCanvas(
@@ -643,7 +644,7 @@ export default function CaptionEditor() {
     ctx.textAlign = style.align as CanvasTextAlign;
     ctx.lineJoin = "round";
     ctx.miterLimit = 2;
- 
+
     const maxW = (style.maxWidthPct / 100) * W;
     const lines = wrapLines(ctx, text, maxW, style.maxLines || 2);
     const lineH = fontPx * style.lineSpacing;
@@ -651,7 +652,7 @@ export default function CaptionEditor() {
     const cy = (style.y / 100) * H;
     const startY = cy - ((lines.length - 1) * lineH) / 2;
     const anchorX = style.align === "left" ? cx - maxW / 2 : style.align === "right" ? cx + maxW / 2 : cx;
- 
+
     // optional background box
     if (style.bgOpacity > 0) {
       const widest = Math.max(...lines.map((l) => ctx.measureText(l).width));
@@ -666,7 +667,7 @@ export default function CaptionEditor() {
       ctx.roundRect(bx, by, bw, bh, r);
       ctx.fill();
     }
- 
+
     lines.forEach((line, i) => {
       const y = startY + i * lineH;
       // shadow
@@ -707,7 +708,7 @@ export default function CaptionEditor() {
       }
     });
   }
- 
+
   /* eslint-disable @typescript-eslint/no-explicit-any */
   // Paint one frame (video + active caption) onto the export canvas.
   function paintFrame(ctx: CanvasRenderingContext2D, src: HTMLVideoElement, W: number, H: number, t: number) {
@@ -715,237 +716,133 @@ export default function CaptionEditor() {
     const active = segments.find((s) => t >= s.start && t < s.end);
     if (active) drawCaptionToCanvas(ctx, W, H, active, styleFor(active), t);
   }
- 
-  // Decode the source file's audio to PCM, then AAC-encode it into the muxer.
-  async function encodeSourceAudio(muxer: any): Promise<{ channels: number; sampleRate: number } | null> {
-    if (!video) return null;
-    try {
-      const AudioEncoderCtor = (window as any).AudioEncoder;
-      const AudioDataCtor = (window as any).AudioData;
-      if (!AudioEncoderCtor || !AudioDataCtor) return null;
-      const arr = await fetch(video.url).then((r) => r.arrayBuffer());
-      const AC: typeof AudioContext = (window as any).AudioContext || (window as any).webkitAudioContext;
-      const ac = new AC();
-      const buf = await ac.decodeAudioData(arr.slice(0));
-      ac.close();
-      const numCh = buf.numberOfChannels;
-      const sampleRate = buf.sampleRate;
- 
-      const audioEncoder = new AudioEncoderCtor({
-        output: (chunk: any, meta: any) => muxer.addAudioChunk(chunk, meta),
-        error: (e: any) => console.warn("audio encode error", e),
-      });
-      audioEncoder.configure({ codec: "mp4a.40.2", numberOfChannels: numCh, sampleRate, bitrate: 128_000 });
- 
-      const total = buf.length;
-      const block = 4096;
-      for (let off = 0; off < total; off += block) {
-        if (cancelRenderRef.current) break;
-        const frames = Math.min(block, total - off);
-        const data = new Float32Array(frames * numCh); // f32-planar: ch0 block, ch1 block, ...
-        for (let ch = 0; ch < numCh; ch++) {
-          data.set(buf.getChannelData(ch).subarray(off, off + frames), ch * frames);
-        }
-        const ad = new AudioDataCtor({
-          format: "f32-planar", sampleRate, numberOfFrames: frames, numberOfChannels: numCh,
-          timestamp: Math.round((off / sampleRate) * 1e6), data,
-        });
-        audioEncoder.encode(ad);
-        ad.close();
-      }
-      await audioEncoder.flush();
-      return { channels: numCh, sampleRate };
-    } catch (e) {
-      console.warn("audio path unavailable, exporting video-only", e);
-      return null;
-    }
+
+  // Lazily load FFmpeg.wasm (single-thread core) from a CDN. Core + worker are
+  // fetched as blob URLs so this works on GitHub Pages (no special headers, no
+  // bundler/basePath worker issues). FFmpeg encodes entirely on the CPU in
+  // WebAssembly, so it never touches the GPU video encoder that crashes here.
+  async function loadFFmpeg() {
+    setRenderStatus("Loading MP4 encoder (one-time ~30 MB download)…");
+    const { FFmpeg } = await import("@ffmpeg/ffmpeg");
+    const { toBlobURL } = await import("@ffmpeg/util");
+    const ffmpegBase = "https://unpkg.com/@ffmpeg/ffmpeg@0.12.15/dist/umd";
+    const coreBase = "https://unpkg.com/@ffmpeg/core@0.12.10/dist/umd";
+    const ff = new FFmpeg();
+    await ff.load({
+      classWorkerURL: await toBlobURL(`${ffmpegBase}/814.ffmpeg.js`, "text/javascript"),
+      coreURL: await toBlobURL(`${coreBase}/ffmpeg-core.js`, "text/javascript"),
+      wasmURL: await toBlobURL(`${coreBase}/ffmpeg-core.wasm`, "application/wasm"),
+    });
+    return ff;
   }
- 
-  // True MP4 (H.264 + AAC) entirely in the browser via WebCodecs + mp4-muxer.
-  async function encodeMP4(src: HTMLVideoElement, canvas: HTMLCanvasElement, ctx: CanvasRenderingContext2D, fps: number): Promise<Blob> {
-    if (!video) throw new Error("no video");
-    const W = canvas.width, H = canvas.height;
-    const VideoEncoderCtor = (window as any).VideoEncoder;
-    const VideoFrameCtor = (window as any).VideoFrame;
-    if (!VideoEncoderCtor || !VideoFrameCtor) throw new Error("WebCodecs not available");
- 
-    // Pick an H.264 profile/level that the encoder supports for this size.
-    const bitrate = Math.round(W * H * fps * 0.14);
-    const candidates = ["avc1.42E028", "avc1.4D4028", "avc1.640028", "avc1.42001f"];
-    let codec = "";
-    for (const c of candidates) {
-      try {
-        const s = await VideoEncoderCtor.isConfigSupported({ codec: c, width: W, height: H, bitrate, framerate: fps });
-        if (s && s.supported) { codec = c; break; }
-      } catch { /* try next */ }
-    }
-    if (!codec) throw new Error("H.264 encoding not supported here");
- 
-    const { Muxer, ArrayBufferTarget } = await import("mp4-muxer");
- 
-    // Audio first (best-effort) so we know whether to declare an audio track.
-    // We build the muxer after probing audio support.
-    let audioInfo: { channels: number; sampleRate: number } | null = null;
-    try {
-      const arr = await fetch(video.url).then((r) => r.arrayBuffer());
-      const AC: typeof AudioContext = (window as any).AudioContext || (window as any).webkitAudioContext;
-      const ac = new AC();
-      const probe = await ac.decodeAudioData(arr.slice(0));
-      audioInfo = { channels: probe.numberOfChannels, sampleRate: probe.sampleRate };
-      ac.close();
-    } catch { audioInfo = null; }
- 
-    const muxer: any = new Muxer({
-      target: new ArrayBufferTarget(),
-      video: { codec: "avc", width: W, height: H, frameRate: fps },
-      ...(audioInfo ? { audio: { codec: "aac" as const, numberOfChannels: audioInfo.channels, sampleRate: audioInfo.sampleRate } } : {}),
-      fastStart: "in-memory",
-    });
- 
-    const videoEncoder = new VideoEncoderCtor({
-      output: (chunk: any, meta: any) => muxer.addVideoChunk(chunk, meta),
-      error: (e: any) => console.warn("video encode error", e),
-    });
-    videoEncoder.configure({ codec, width: W, height: H, bitrate, framerate: fps });
- 
-    if (audioInfo) await encodeSourceAudio(muxer);
- 
-    // Capture frames in real time, throttled to `fps`, via requestVideoFrameCallback
-    // (falls back to requestAnimationFrame).
-    const minDelta = 1 / fps - 0.001;
-    let lastT = -1, frameCount = 0;
-    src.currentTime = 0;
-    await src.play();
- 
-    await new Promise<void>((resolve) => {
-      const handle = (t: number) => {
-        if (cancelRenderRef.current) { resolve(); return; }
-        if (t - lastT >= minDelta) {
-          paintFrame(ctx, src, W, H, t);
-          const frame = new VideoFrameCtor(canvas, { timestamp: Math.round(t * 1e6) });
-          videoEncoder.encode(frame, { keyFrame: frameCount % 60 === 0 });
-          frame.close();
-          lastT = t; frameCount++;
-          setRenderProgress(Math.min(99, Math.round((t / video.duration) * 100)));
-        }
-        if (src.ended || t >= video.duration - 0.05) { resolve(); return; }
-        next();
-      };
-      const rVFC = (src as any).requestVideoFrameCallback?.bind(src);
-      const next = rVFC
-        ? () => rVFC((_now: number, meta: any) => handle(meta?.mediaTime ?? src.currentTime))
-        : () => requestAnimationFrame(() => handle(src.currentTime));
-      next();
-    });
- 
-    src.pause();
-    await videoEncoder.flush();
-    muxer.finalize();
-    const { buffer } = muxer.target as { buffer: ArrayBuffer };
-    return new Blob([buffer], { type: "video/mp4" });
-  }
- 
-  // WebM fallback (only for browsers without WebCodecs) via MediaRecorder.
-  async function encodeWebM(src: HTMLVideoElement, canvas: HTMLCanvasElement, ctx: CanvasRenderingContext2D, fps: number): Promise<Blob> {
-    if (!video) throw new Error("no video");
-    const W = canvas.width, H = canvas.height;
-    const vStream = canvas.captureStream(fps);
-    try {
-      const el = src as any;
-      const a = el.captureStream ? el.captureStream() : el.mozCaptureStream?.();
-      a?.getAudioTracks().forEach((tr: MediaStreamTrack) => vStream.addTrack(tr));
-    } catch { /* video-only */ }
-    const mimeType = ["video/webm;codecs=vp8,opus", "video/webm;codecs=vp8", "video/webm"]
-      .find((m) => MediaRecorder.isTypeSupported(m));
-    if (!mimeType) throw new Error("This browser cannot record video");
-    const chunks: BlobPart[] = [];
-    const rec = new MediaRecorder(vStream, { mimeType, videoBitsPerSecond: Math.round(W * H * fps * 0.12) });
-    rec.ondataavailable = (e) => { if (e.data.size) chunks.push(e.data); };
-    const done = new Promise<Blob>((resolve) => { rec.onstop = () => resolve(new Blob(chunks, { type: "video/webm" })); });
-    rec.start(100);
-    src.currentTime = 0;
-    await src.play();
-    await new Promise<void>((resolve) => {
-      const step = () => {
-        if (cancelRenderRef.current) { resolve(); return; }
-        const t = src.currentTime;
-        paintFrame(ctx, src, W, H, t);
-        setRenderProgress(Math.min(99, Math.round((t / video.duration) * 100)));
-        if (src.ended || t >= video.duration - 0.05) { resolve(); return; }
-        requestAnimationFrame(step);
-      };
-      requestAnimationFrame(step);
-    });
-    src.pause();
-    rec.stop();
-    return done;
-  }
- 
+
   async function renderVideo() {
     if (!video) return;
     setRendering(true);
     setRenderError(null);
     setRenderProgress(0);
+    setRenderStatus("");
     cancelRenderRef.current = false;
- 
+
     const src = document.createElement("video");
     src.src = video.url;
-    src.muted = false;
+    src.muted = true;
     (src as any).playsInline = true;
     const canvas = document.createElement("canvas");
- 
+    let ff: any = null;
+
     try {
       await document.fonts.ready;
       await new Promise<void>((res, rej) => {
         src.onloadedmetadata = () => res();
         src.onerror = () => rej(new Error("Could not read the video for export"));
       });
- 
-      // Cap longest side at 1280 (keeps the encoder well within H.264 limits and
-      // avoids the heavy-encode renderer crash). H.264 also requires even dims.
+
+      // Even dimensions for H.264; cap longest side at 1280 to keep memory/time sane.
       const MAX_SIDE = 1280;
       const scale = Math.min(1, MAX_SIDE / Math.max(video.w, video.h));
       const even = (n: number) => Math.max(2, Math.round((n * scale) / 2) * 2);
-      canvas.width = even(video.w);
-      canvas.height = even(video.h);
-      const ctx = canvas.getContext("2d");
+      const W = even(video.w), H = even(video.h);
+      canvas.width = W; canvas.height = H;
+      const ctx = canvas.getContext("2d", { willReadFrequently: true }) as CanvasRenderingContext2D | null;
       if (!ctx) throw new Error("Canvas 2D context unavailable in this browser");
- 
+
       const fps = 30;
-      const hasWebCodecs = typeof window !== "undefined" && !!(window as any).VideoEncoder && !!(window as any).VideoFrame;
- 
-      let blob: Blob;
-      let ext: "mp4" | "webm";
-      if (hasWebCodecs) {
-        try {
-          blob = await encodeMP4(src, canvas, ctx, fps);
-          ext = "mp4";
-        } catch (mp4err) {
-          console.warn("MP4 export failed, falling back to WebM:", mp4err);
-          if (cancelRenderRef.current) { flash("Export cancelled"); return; }
-          src.currentTime = 0;
-          blob = await encodeWebM(src, canvas, ctx, fps);
-          ext = "webm";
-        }
-      } else {
-        blob = await encodeWebM(src, canvas, ctx, fps);
-        ext = "webm";
+      const duration = video.duration;
+      const frameCount = Math.max(1, Math.ceil(duration * fps));
+
+      // Load the encoder first so a network problem stops here with a clear message.
+      ff = await loadFFmpeg();
+
+      // 1) Capture frames deterministically by seeking. Drawing to a 2D canvas
+      //    is software work and does not crash like the video encoder did.
+      const seekTo = (t: number) => new Promise<void>((resolve) => {
+        let settled = false;
+        const done = () => { if (!settled) { settled = true; src.removeEventListener("seeked", done); resolve(); } };
+        src.addEventListener("seeked", done);
+        src.currentTime = Math.min(t, Math.max(0, duration - 1 / fps));
+        setTimeout(done, 2500); // safety if 'seeked' is missed
+      });
+      const toJpeg = (): Promise<Uint8Array> => new Promise((resolve, reject) => {
+        canvas.toBlob(async (b) => {
+          if (!b) { reject(new Error("Frame capture failed")); return; }
+          resolve(new Uint8Array(await b.arrayBuffer()));
+        }, "image/jpeg", 0.9);
+      });
+
+      setRenderStatus("Rendering frames…");
+      for (let i = 0; i < frameCount; i++) {
+        if (cancelRenderRef.current) { flash("Export cancelled"); return; }
+        await seekTo(i / fps);
+        paintFrame(ctx, src, W, H, src.currentTime);
+        await ff.writeFile(`f${String(i).padStart(5, "0")}.jpg`, await toJpeg());
+        setRenderProgress(Math.round((i / frameCount) * 70)); // frame capture = first 70%
       }
- 
       if (cancelRenderRef.current) { flash("Export cancelled"); return; }
- 
+
+      // 2) Write the original file so FFmpeg can mux its audio (best-effort).
+      const safeExt = (video.name.split(".").pop() || "mp4").toLowerCase().replace(/[^a-z0-9]/g, "") || "mp4";
+      const inputName = `input.${safeExt}`;
+      let hasAudioInput = false;
+      try {
+        setRenderStatus("Adding audio…");
+        const srcBytes = new Uint8Array((await fetch(video.url).then((r) => r.arrayBuffer())) as ArrayBuffer);
+        await ff.writeFile(inputName, srcBytes);
+        hasAudioInput = true;
+      } catch { hasAudioInput = false; }
+
+      // 3) Encode the JPEG sequence to H.264 + AAC MP4 (pure CPU/WASM).
+      setRenderStatus("Encoding MP4… (this part is CPU-only and may take a while)");
+      ff.on("progress", ({ progress }: { progress: number }) => {
+        if (progress >= 0 && progress <= 1) setRenderProgress(70 + Math.round(progress * 29));
+      });
+      const args = ["-framerate", String(fps), "-start_number", "0", "-i", "f%05d.jpg"];
+      if (hasAudioInput) args.push("-i", inputName, "-map", "0:v:0", "-map", "1:a:0?");
+      args.push("-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "veryfast", "-crf", "23");
+      if (hasAudioInput) args.push("-c:a", "aac", "-b:a", "128k", "-shortest");
+      args.push("output.mp4");
+      await ff.exec(args);
+
+      if (cancelRenderRef.current) { flash("Export cancelled"); return; }
+
+      const out = await ff.readFile("output.mp4");
+      const blob = new Blob([out as any], { type: "video/mp4" });
+
       setRenderProgress(100);
+      setRenderStatus("");
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = `captionforge-export.${ext}`;
+      a.download = "captionforge-export.mp4";
       a.click();
-      setTimeout(() => URL.revokeObjectURL(url), 5000);
-      flash(ext === "mp4" ? "MP4 export complete — download started" : "Export complete (.webm) — download started");
+      setTimeout(() => URL.revokeObjectURL(url), 8000);
+      flash("MP4 export complete — download started");
     } catch (err: unknown) {
       setRenderError(err instanceof Error ? err.message : "Export failed");
     } finally {
+      try { ff?.terminate(); } catch { /* ignore */ }
       setRendering(false);
+      setRenderStatus("");
       src.removeAttribute("src");
       src.load();
     }
@@ -954,7 +851,7 @@ export default function CaptionEditor() {
   function cancelRender() {
     cancelRenderRef.current = true;
   }
- 
+
   // ---- drag caption around the preview ----
   function onPreviewPointerDown() {
     if (locked || !activeSeg || !previewRef.current) return;
@@ -974,26 +871,26 @@ export default function CaptionEditor() {
     window.removeEventListener("pointermove", onPreviewPointerMove);
     window.removeEventListener("pointerup", onPreviewPointerUp);
   }
- 
+
   function seekTo(t: number) {
     setCurrentTime(t);
     if (videoRef.current) videoRef.current.currentTime = t;
   }
- 
+
   const aspect = video ? `${video.w}:${video.h}` : "16:9";
   const styleP = activePreset.style;
   const setS = patchActivePreset;
- 
+
   // -------------------------------------------------------------------------
   return (
     <div style={{ background: C.bg, color: C.text, minHeight: "100vh", fontFamily: "Inter, system-ui, sans-serif", fontSize: 14 }}>
       <style>{CSS}</style>
- 
+
       {/* tiny-screen note */}
       <div className="cf-small-note" style={{ display: "none", padding: 18, textAlign: "center", color: C.dim }}>
         CaptionForge is built for detailed editing — open it on a desktop or tablet for the full workspace.
       </div>
- 
+
       <div className="cf-app">
         {/* ============ top bar ============ */}
         <header style={{ display: "flex", alignItems: "center", gap: 14, padding: "12px 18px", borderBottom: `1px solid ${C.line}`, background: C.bg2 }}>
@@ -1007,9 +904,9 @@ export default function CaptionEditor() {
               </div>
             </div>
           </div>
- 
+
           <div style={{ flex: 1 }} />
- 
+
           {/* Auto-generate + preset dropdown */}
           <div style={{ position: "relative" }}>
             <div style={{ display: "flex", alignItems: "stretch", borderRadius: 10, overflow: "hidden", border: `1px solid ${C.amber}` }}>
@@ -1048,17 +945,17 @@ export default function CaptionEditor() {
               </div>
             )}
           </div>
- 
+
           <Btn kind="ghost" onClick={exportProject} title="Export the project (presets + captions) as JSON"><Download size={14} /> Save project</Btn>
           {rendering ? (
-            <Btn kind="danger" onClick={cancelRender}><X size={14} /> Cancel ({renderProgress}%)</Btn>
+            <Btn kind="danger" onClick={cancelRender} title={renderStatus || "Rendering"}><X size={14} /> Cancel ({renderProgress}%)</Btn>
           ) : (
             <Btn kind="solid" onClick={renderVideo} disabled={!video || segments.length === 0} title="Burn captions into the video in your browser and download an MP4 (falls back to WebM on browsers without WebCodecs)">
               <Film size={14} /> Render &amp; Download
             </Btn>
           )}
         </header>
- 
+
         {/* ============ body ============ */}
         <div className="cf-body">
           {/* ---------- LEFT: captions + fonts ---------- */}
@@ -1068,14 +965,14 @@ export default function CaptionEditor() {
               <span style={{ fontWeight: 700, fontSize: 13, flex: 1 }}>Captions</span>
               <Btn onClick={addSeg} title="Add caption at playhead"><Plus size={13} /></Btn>
             </div>
- 
+
             {/* search & replace */}
             <div style={{ padding: "10px 14px", borderBottom: `1px solid ${C.line}`, display: "flex", gap: 6 }}>
               <input placeholder="Find" value={search} onChange={(e) => setSearch(e.target.value)} style={inp()} />
               <input placeholder="Replace" value={replace} onChange={(e) => setReplace(e.target.value)} style={inp()} />
               <Btn onClick={applySearchReplace} title="Replace in all captions"><Search size={13} /></Btn>
             </div>
- 
+
             <div style={{ display: "flex", gap: 6, padding: "8px 14px", borderBottom: `1px solid ${C.line}` }}>
               <Btn onClick={undo} title="Undo"><RotateCcw size={13} /></Btn>
               <Btn onClick={redo} title="Redo" style={{ transform: "scaleX(-1)" }}><RotateCcw size={13} /></Btn>
@@ -1085,7 +982,7 @@ export default function CaptionEditor() {
                 <input type="file" accept=".srt,.vtt" hidden onChange={(e) => { const f = e.target.files?.[0]; if (f) { const r = new FileReader(); r.onload = () => autoGenerate(typeof r.result === "string" ? r.result : undefined); r.readAsText(f); } }} />
               </label>
             </div>
- 
+
             {/* caption list */}
             <div className="cf-scroll" style={{ flex: 1, overflow: "auto", padding: 10 }}>
               {segments.length === 0 && (
@@ -1124,7 +1021,7 @@ export default function CaptionEditor() {
                 );
               })}
             </div>
- 
+
             {/* fonts */}
             <div style={{ borderTop: `1px solid ${C.line}`, padding: "12px 14px" }}>
               <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
@@ -1139,7 +1036,7 @@ export default function CaptionEditor() {
                 : customFonts.map((f) => <div key={f.name} style={{ fontSize: 12.5, padding: "4px 0", fontFamily: `'${f.name}'` }}>{f.name}</div>)}
             </div>
           </aside>
- 
+
           {/* ---------- CENTRE: preview ---------- */}
           <main className="cf-centre" style={{ background: C.bg, display: "flex", flexDirection: "column" }}>
             <div style={{ flex: 1, display: "grid", placeItems: "center", padding: 22, position: "relative" }}>
@@ -1162,7 +1059,7 @@ export default function CaptionEditor() {
                 </div>
               )}
             </div>
- 
+
             {/* transport */}
             {video && (
               <div style={{ padding: "10px 18px 14px", borderTop: `1px solid ${C.line}`, background: C.bg2 }}>
@@ -1191,7 +1088,7 @@ export default function CaptionEditor() {
                 </div>
               </div>
             )}
- 
+
             {video && (
               <div style={{ display: "flex", gap: 18, padding: "8px 18px 12px", fontSize: 11.5, color: C.faint, background: C.bg2, borderTop: `1px solid ${C.line}`, flexWrap: "wrap" }}>
                 <span>{video.name}</span>
@@ -1203,7 +1100,7 @@ export default function CaptionEditor() {
               </div>
             )}
           </main>
- 
+
           {/* ---------- RIGHT: presets + style ---------- */}
           <aside className="cf-right" style={{ background: C.bg2, borderLeft: `1px solid ${C.line}`, overflow: "auto" }}>
             {/* PRESET MANAGER — the centrepiece */}
@@ -1212,7 +1109,7 @@ export default function CaptionEditor() {
                 <Sparkles size={15} color={C.amber} />
                 <span style={{ fontWeight: 700, fontSize: 13, flex: 1 }}>Auto-subtitle presets</span>
               </div>
- 
+
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 12 }}>
                 {presets.map((p) => {
                   const on = activePresetId === p.id;
@@ -1235,7 +1132,7 @@ export default function CaptionEditor() {
                   );
                 })}
               </div>
- 
+
               {/* preset actions */}
               <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 10 }}>
                 <Btn onClick={newPreset}><Plus size={12} /> New</Btn>
@@ -1248,16 +1145,16 @@ export default function CaptionEditor() {
                 <label><Btn><FileUp size={12} /> Import</Btn><input type="file" accept=".json" hidden onChange={(e) => { const f = e.target.files?.[0]; if (f) importPreset(f); }} /></label>
                 <Btn onClick={resetOriginal}><RotateCcw size={12} /> Reset original</Btn>
               </div>
- 
+
               <Btn kind="solid" onClick={saveAsDefault} style={{ width: "100%", justifyContent: "center", marginBottom: 10 }}>
                 <Star size={14} /> Save “{activePreset.name}” as Auto-Subtitle Default
               </Btn>
- 
+
               <div style={{ background: C.panel, borderRadius: 9, padding: "8px 10px" }}>
                 <Toggle on={applyDefaultToNew} onChange={setApplyDefaultToNew} label="Apply default preset to newly added subtitles" />
               </div>
             </div>
- 
+
             {/* per-segment override controls */}
             {selectedSeg && segments.find((s) => s.id === selectedSeg) && (
               <div style={{ padding: "12px 16px", borderBottom: `1px solid ${C.line}`, background: hexA(C.mint, 0.05) }}>
@@ -1272,7 +1169,7 @@ export default function CaptionEditor() {
                 </div>
               </div>
             )}
- 
+
             {/* STYLE EDITOR (writes to active preset) */}
             <Section title="Text & font" icon={<Type size={14} color={C.amber} />}>
               <Field label="Font family">
@@ -1300,7 +1197,7 @@ export default function CaptionEditor() {
                 <Field label="Max lines" hint={styleP.maxLines}><Slide value={styleP.maxLines} min={1} max={4} onChange={(v) => setS({ maxLines: v })} /></Field>
               </div>
             </Section>
- 
+
             <Section title="Outline & shadow" icon={<Crosshair size={14} color={C.amber} />} defaultOpen={false}>
               <Field label="Outline colour"><Color value={styleP.outlineColor} onChange={(v) => setS({ outlineColor: v })} /></Field>
               <Field label="Outline thickness" hint={`${styleP.outlineWidthPct}% of size`}><Slide value={styleP.outlineWidthPct} min={0} max={16} step={0.5} onChange={(v) => setS({ outlineWidthPct: v })} /></Field>
@@ -1312,7 +1209,7 @@ export default function CaptionEditor() {
               </div>
               <Field label="Shadow opacity" hint={styleP.shadowOpacity.toFixed(2)}><Slide value={styleP.shadowOpacity} min={0} max={1} step={0.05} onChange={(v) => setS({ shadowOpacity: v })} /></Field>
             </Section>
- 
+
             <Section title="Background box" icon={<Layers size={14} color={C.amber} />} defaultOpen={false}>
               <Field label="Background colour"><Color value={styleP.bgColor} onChange={(v) => setS({ bgColor: v })} /></Field>
               <Field label="Background opacity" hint={styleP.bgOpacity.toFixed(2)}><Slide value={styleP.bgOpacity} min={0} max={1} step={0.05} onChange={(v) => setS({ bgOpacity: v })} /></Field>
@@ -1321,7 +1218,7 @@ export default function CaptionEditor() {
                 <Field label="Corner radius" hint={styleP.cornerRadius}><Slide value={styleP.cornerRadius} min={0} max={40} onChange={(v) => setS({ cornerRadius: v })} /></Field>
               </div>
             </Section>
- 
+
             <Section title="Highlight & animation" icon={<Sparkles size={14} color={C.amber} />} defaultOpen={false}>
               <Field label="Highlighted word colour"><Color value={styleP.highlightColor} onChange={(v) => setS({ highlightColor: v })} /></Field>
               <Field label="Highlight background"><Color value={styleP.highlightBg} onChange={(v) => setS({ highlightBg: v })} /></Field>
@@ -1331,7 +1228,7 @@ export default function CaptionEditor() {
                 </select>
               </Field>
             </Section>
- 
+
             <Section title="Position & layout" icon={<Crosshair size={14} color={C.amber} />}>
               <div style={{ display: "flex", gap: 6, marginBottom: 11, flexWrap: "wrap" }}>
                 {POS_PRESETS.map(([n, x, y]) => <Btn key={n} onClick={() => setS({ x, y })}>{n}</Btn>)}
@@ -1344,14 +1241,19 @@ export default function CaptionEditor() {
                 <Btn onClick={() => setS({ x: ORIGINAL_DEFAULT.x, y: ORIGINAL_DEFAULT.y })}><RotateCcw size={12} /> Reset</Btn>
               </div>
             </Section>
- 
+
             <div style={{ padding: 14, fontSize: 11, color: C.faint, lineHeight: 1.6 }}>
               Position uses percentages so a preset looks identical across 9:16, 16:9 and 1:1 exports. In the Next.js build these same numbers feed FFmpeg <code>drawtext</code> / ASS during burn-in.
             </div>
           </aside>
         </div>
       </div>
- 
+
+      {rendering && renderStatus && (
+        <div style={{ position: "fixed", top: 64, left: "50%", transform: "translateX(-50%)", background: hexA("#0a1a2a", 0.92), border: `1px solid ${C.blue}`, color: C.text, padding: "9px 16px", borderRadius: 10, fontSize: 12.5, zIndex: 89, maxWidth: 600, textAlign: "center" }}>
+          {renderStatus} {renderProgress > 0 ? `(${renderProgress}%)` : ""}
+        </div>
+      )}
       {renderError && (
         <div style={{ position: "fixed", top: 64, left: "50%", transform: "translateX(-50%)", background: hexA("#3a1018", 0.92), border: `1px solid ${C.pink}`, color: C.text, padding: "9px 16px", borderRadius: 10, fontSize: 12.5, zIndex: 89, maxWidth: 600, textAlign: "center" }}>
           {renderError}
@@ -1370,14 +1272,14 @@ export default function CaptionEditor() {
     </div>
   );
 }
- 
+
 // ---- helper components / styles ----
 const MiniBtn = ({ onClick, icon, title, danger }: {
   onClick: (e: React.MouseEvent) => void; icon: React.ReactNode; title: string; danger?: boolean;
 }) => (
   <button onClick={onClick} title={title} style={{ width: 26, height: 26, borderRadius: 7, background: C.bg2, border: `1px solid ${C.line}`, color: danger ? C.pink : C.dim, display: "grid", placeItems: "center", cursor: "pointer" }}>{icon}</button>
 );
- 
+
 function Dropzone({ onFile }: { onFile: (f: File | undefined) => void }) {
   const [over, setOver] = useState(false);
   return (
@@ -1392,13 +1294,13 @@ function Dropzone({ onFile }: { onFile: (f: File | undefined) => void }) {
     </label>
   );
 }
- 
+
 const inp = (): React.CSSProperties => ({ flex: 1, minWidth: 0, background: C.bg, border: `1px solid ${C.line}`, borderRadius: 7, color: C.text, padding: "6px 8px", fontSize: 12 });
 const selS = (): React.CSSProperties => ({ width: "100%", background: C.bg2, border: `1px solid ${C.line2}`, borderRadius: 8, color: C.text, padding: "8px 10px", fontSize: 13, cursor: "pointer" });
 const timeChip = (): React.CSSProperties => ({ width: 62, background: C.bg2, border: `1px solid ${C.line}`, borderRadius: 5, color: C.dim, padding: "2px 5px", fontSize: 11, fontVariantNumeric: "tabular-nums", textAlign: "center" });
 const transBtn = (): React.CSSProperties => ({ width: 32, height: 32, borderRadius: 9, background: C.panel2, border: `1px solid ${C.line2}`, color: C.text, display: "grid", placeItems: "center", cursor: "pointer", fontSize: 18 });
 const rowStyle = (on: boolean): React.CSSProperties => ({ display: "flex", alignItems: "center", gap: 8, width: "100%", padding: "8px 8px", borderRadius: 8, background: on ? hexA(C.amber, 0.12) : "transparent", border: "none", color: C.text, cursor: "pointer", fontSize: 13, fontWeight: 600 });
- 
+
 const CSS = `
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Space+Grotesk:wght@500;600;700&family=Anton&family=Bebas+Neue&family=Poppins:wght@500;700;800&family=Montserrat:wght@600;800&family=Oswald:wght@500;700&family=Archivo+Black&display=swap');
 * { box-sizing: border-box; }
