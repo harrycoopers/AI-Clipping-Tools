@@ -659,7 +659,7 @@ export default function CaptionEditor() {
     try {
       const audio = await prepareAudio(video.file);
       if (!transcriptionWorkerRef.current) {
-        transcriptionWorkerRef.current = new Worker(asset("/transcription.worker.mjs"), { type: "module" });
+        transcriptionWorkerRef.current = new Worker(asset("/transcription.worker.mjs?v=2"), { type: "module" });
       }
       const worker = transcriptionWorkerRef.current;
       const result = await new Promise<{ chunks: { text: string; timestamp?: [number | null, number | null] }[]; text: string; device: "webgpu" | "wasm" }>((resolve, reject) => {
@@ -692,7 +692,9 @@ export default function CaptionEditor() {
           } else if (message.type === "cancelled") {
             reject(new DOMException("Transcription cancelled", "AbortError"));
           } else if (message.type === "error") {
-            reject(new Error(message.message));
+            const error = new Error(message.message);
+            error.name = message.backend === "wasm" ? "WasmTranscriptionError" : "WebGpuTranscriptionError";
+            reject(error);
           }
         };
         worker.onerror = () => reject(new Error("The transcription worker could not start."));
@@ -742,6 +744,10 @@ export default function CaptionEditor() {
       } else {
         setLastTranscriptionFailed(true);
         setTranscribeError(error instanceof Error ? error.message : "Transcription failed.");
+        // A failed ONNX/WebGPU session can leave backend state unusable.
+        // Always use a fresh worker for Retry or a changed device setting.
+        transcriptionWorkerRef.current?.terminate();
+        transcriptionWorkerRef.current = null;
       }
     } finally {
       transcriptionRejectRef.current = null;

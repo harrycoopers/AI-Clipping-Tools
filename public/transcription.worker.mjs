@@ -15,13 +15,16 @@ function send(type, payload = {}) {
   self.postMessage({ type, ...payload });
 }
 
-function normalizeError(error) {
+function normalizeError(error, backend) {
   const message = error instanceof Error ? error.message : String(error);
   if (/memory|allocation|buffer|out of bounds/i.test(message)) {
     return "The transcription model ran out of memory. Close other tabs or choose the Fast model.";
   }
-  if (/webgpu|gpu|adapter|device/i.test(message)) {
+  if (backend === "webgpu" && /webgpu|gpu|adapter|device|shader|pipeline/i.test(message)) {
     return "WebGPU could not run this model on this device. Retry with CPU/WASM mode.";
+  }
+  if (backend === "wasm" && /wasm|webassembly|onnx|backend|execution provider/i.test(message)) {
+    return `CPU/WASM transcription could not start: ${message}`;
   }
   if (/fetch|network|download|404/i.test(message)) {
     return "The AI model could not be downloaded. Check the connection and retry.";
@@ -33,6 +36,12 @@ async function loadPipeline(model, requestedDevice, forceReload = false) {
   const { pipeline, env } = await import(TRANSFORMERS_CDN);
   env.allowLocalModels = false;
   env.useBrowserCache = true;
+  // GitHub Pages cannot provide the cross-origin isolation required by
+  // multi-threaded WASM. A single thread is slower but works reliably.
+  if (env.backends?.onnx?.wasm) {
+    env.backends.onnx.wasm.numThreads = 1;
+    env.backends.onnx.wasm.proxy = false;
+  }
 
   const modelId = MODEL_IDS[model] || MODEL_IDS.balanced;
   const device = requestedDevice === "webgpu" ? "webgpu" : "wasm";
@@ -44,7 +53,6 @@ async function loadPipeline(model, requestedDevice, forceReload = false) {
   send("stage", { stage: "model", status: "active", detail: `Loading ${model} model on ${device.toUpperCase()}` });
 
   const options = {
-    device,
     progress_callback: (event) => {
       if (cancelled) return;
       const progress = Number.isFinite(event?.progress) ? Math.round(event.progress) : null;
@@ -56,10 +64,11 @@ async function loadPipeline(model, requestedDevice, forceReload = false) {
     },
   };
   if (device === "webgpu") {
+    options.device = "webgpu";
     options.dtype = { encoder_model: "fp16", decoder_model_merged: "q4" };
-  } else {
-    options.dtype = { encoder_model: "q8", decoder_model_merged: "q4" };
   }
+  // For CPU, omit `device` and `dtype`: Transformers.js officially defaults
+  // to its broadly-compatible q8 WASM path in browsers.
 
   transcriber = await pipeline("automatic-speech-recognition", modelId, options);
   loadedKey = key;
@@ -77,8 +86,8 @@ self.onmessage = async (event) => {
   if (message?.type !== "transcribe") return;
 
   cancelled = false;
+  let device = message.device === "webgpu" ? "webgpu" : "wasm";
   try {
-    let device = message.device;
     let recognizer;
     try {
       recognizer = await loadPipeline(message.model, device, message.forceReload);
@@ -118,6 +127,12 @@ self.onmessage = async (event) => {
       device,
     });
   } catch (error) {
-    if (!cancelled) send("error", { message: normalizeError(error) });
+    if (!cancelled) {
+      send("error", {
+        message: normalizeError(error, device),
+        backend: device,
+        technical: error instanceof Error ? error.message : String(error),
+      });
+    }
   }
 };
