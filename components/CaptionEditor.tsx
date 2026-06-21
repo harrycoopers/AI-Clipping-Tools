@@ -727,31 +727,62 @@ export default function CaptionEditor() {
     if (active) drawCaptionToCanvas(ctx, W, H, active, styleFor(active), t);
   }
 
-  // Lazily load FFmpeg.wasm (single-thread core) from a CDN. Core + worker are
-  // fetched as blob URLs so this works on GitHub Pages (no special headers, no
-  // bundler/basePath worker issues). FFmpeg encodes entirely on the CPU in
-  // WebAssembly, so it never touches the GPU video encoder that crashes here.
+  // Lazily load FFmpeg.wasm. Next bundles @ffmpeg/ffmpeg's module worker; only
+  // the large single-thread core is fetched as blob URLs. Two CDN sources are
+  // tried so a transient outage or blocked host does not immediately abort.
   async function loadFFmpeg() {
-    setRenderStatus("Loading MP4 encoder (one-time ~30 MB download)…");
+    setRenderStatus("Loading MP4 encoder (one-time download)…");
     const { FFmpeg } = await import("@ffmpeg/ffmpeg");
     const { toBlobURL } = await import("@ffmpeg/util");
-    const ffmpegBase = "https://unpkg.com/@ffmpeg/ffmpeg@0.12.15/dist/umd";
-    const coreBase = "https://unpkg.com/@ffmpeg/core@0.12.10/dist/umd";
-    const ff = new FFmpeg();
-    await ff.load({
-      classWorkerURL: await toBlobURL(`${ffmpegBase}/814.ffmpeg.js`, "text/javascript"),
-      coreURL: await toBlobURL(`${coreBase}/ffmpeg-core.js`, "text/javascript"),
-      wasmURL: await toBlobURL(`${coreBase}/ffmpeg-core.wasm`, "application/wasm"),
-    });
-    return ff;
+    const coreSources = [
+      "https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.10/dist/umd",
+      "https://unpkg.com/@ffmpeg/core@0.12.10/dist/umd",
+    ];
+    let lastError: unknown = null;
+
+    for (const coreBase of coreSources) {
+      const ff = new FFmpeg();
+      try {
+        let timeoutId = 0;
+        const timeout = new Promise<never>((_, reject) => {
+          timeoutId = window.setTimeout(
+            () => reject(new Error("MP4 encoder download timed out")),
+            45_000
+          );
+        });
+        try {
+          await Promise.race([
+            (async () => {
+              const [coreURL, wasmURL] = await Promise.all([
+                toBlobURL(`${coreBase}/ffmpeg-core.js`, "text/javascript"),
+                toBlobURL(`${coreBase}/ffmpeg-core.wasm`, "application/wasm"),
+              ]);
+              await ff.load({ coreURL, wasmURL });
+            })(),
+            timeout,
+          ]);
+        } finally {
+          window.clearTimeout(timeoutId);
+        }
+        return ff;
+      } catch (error) {
+        lastError = error;
+        try { ff.terminate(); } catch { /* ignore */ }
+      }
+    }
+
+    const detail = lastError instanceof Error ? lastError.message : String(lastError || "");
+    throw new Error(
+      `Could not load the MP4 encoder${detail ? `: ${detail}` : ""}. Check your connection or disable content blockers for this site.`
+    );
   }
 
   async function renderVideo() {
     if (!video) return;
     setRendering(true);
     setRenderError(null);
-    setRenderProgress(0);
-    setRenderStatus("");
+    setRenderProgress(1);
+    setRenderStatus("Preparing MP4 export…");
     cancelRenderRef.current = false;
 
     const src = document.createElement("video");
@@ -909,7 +940,9 @@ export default function CaptionEditor() {
       downloadBlob("captionforge-export.mp4", blob);
       flash("MP4 export complete — download started");
     } catch (err: unknown) {
-      setRenderError(err instanceof Error ? err.message : "Export failed");
+      const message = err instanceof Error ? err.message : "Export failed";
+      setRenderError(message);
+      flash("Export stopped — see the error message at the top");
     } finally {
       try { ff?.terminate(); } catch { /* ignore */ }
       try {
