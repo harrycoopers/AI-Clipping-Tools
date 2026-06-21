@@ -733,56 +733,6 @@ export default function CaptionEditor() {
     if (active) drawCaptionToCanvas(ctx, W, H, active, styleFor(active), t);
   }
 
-  // Lazily load FFmpeg.wasm. Next bundles @ffmpeg/ffmpeg's module worker; only
-  // the large single-thread core is fetched as blob URLs. Two CDN sources are
-  // tried so a transient outage or blocked host does not immediately abort.
-  async function loadFFmpeg() {
-    setRenderStatus("Loading MP4 encoder (one-time download)…");
-    const { FFmpeg } = await import("@ffmpeg/ffmpeg");
-    const { toBlobURL } = await import("@ffmpeg/util");
-    const coreSources = [
-      "https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.10/dist/umd",
-      "https://unpkg.com/@ffmpeg/core@0.12.10/dist/umd",
-    ];
-    let lastError: unknown = null;
-
-    for (const coreBase of coreSources) {
-      const ff = new FFmpeg();
-      try {
-        let timeoutId = 0;
-        const timeout = new Promise<never>((_, reject) => {
-          timeoutId = window.setTimeout(
-            () => reject(new Error("MP4 encoder download timed out")),
-            45_000
-          );
-        });
-        try {
-          await Promise.race([
-            (async () => {
-              const [coreURL, wasmURL] = await Promise.all([
-                toBlobURL(`${coreBase}/ffmpeg-core.js`, "text/javascript"),
-                toBlobURL(`${coreBase}/ffmpeg-core.wasm`, "application/wasm"),
-              ]);
-              await ff.load({ coreURL, wasmURL });
-            })(),
-            timeout,
-          ]);
-        } finally {
-          window.clearTimeout(timeoutId);
-        }
-        return ff;
-      } catch (error) {
-        lastError = error;
-        try { ff.terminate(); } catch { /* ignore */ }
-      }
-    }
-
-    const detail = lastError instanceof Error ? lastError.message : String(lastError || "");
-    throw new Error(
-      `Could not load the MP4 encoder${detail ? `: ${detail}` : ""}. Check your connection or disable content blockers for this site.`
-    );
-  }
-
   async function isSeekableVideo(blob: Blob): Promise<boolean> {
     const url = URL.createObjectURL(blob);
     const probe = document.createElement("video");
@@ -836,9 +786,6 @@ export default function CaptionEditor() {
     src.muted = true;
     (src as any).playsInline = true;
     const canvas = document.createElement("canvas");
-    let ff: any = null;
-    let activeStream: MediaStream | null = null;
-    let activeRecorder: MediaRecorder | null = null;
 
     try {
       const saveFinishedVideo = async (blob: Blob) => {
@@ -877,207 +824,225 @@ export default function CaptionEditor() {
 
       const fps = 60;
       const duration = video.duration;
-
-      // Record the composited canvas as one compressed stream. Keeping every
-      // frame as a separate JPEG in FFmpeg's WASM filesystem exhausted browser
-      // memory on normal-length videos before an MP4 could be produced.
-      if (!canvas.captureStream || typeof MediaRecorder === "undefined") {
-        throw new Error("This browser cannot render video. Use the latest Chrome or Edge.");
-      }
-      // Let the browser pace capture at 60 FPS. A manual 16 ms setInterval can
-      // queue expensive 1080p draws faster than they finish, producing bursts
-      // of duplicate frames followed by visible freezes.
-      const canvasStream = canvas.captureStream(fps);
-      activeStream = canvasStream;
-      const sourceWithCapture = src as HTMLVideoElement & {
-        captureStream?: () => MediaStream;
-        mozCaptureStream?: () => MediaStream;
-      };
-      const sourceCapture = sourceWithCapture.captureStream || sourceWithCapture.mozCaptureStream;
-      if (sourceCapture) {
-        try {
-          sourceCapture.call(src).getAudioTracks().forEach((track) => canvasStream.addTrack(track));
-        } catch { /* FFmpeg can fall back to audio from the source file. */ }
-      }
-
-      // Current Chrome/Edge versions can record H.264 MP4 directly. Prefer that
-      // path so clicking Export does not depend on a 30 MB FFmpeg download.
-      const recorderTypes = [
-        "video/mp4;codecs=avc1.42E01E,mp4a.40.2",
-        "video/mp4;codecs=avc1.42E01E",
-        "video/mp4",
-        "video/webm;codecs=vp9,opus",
-        "video/webm;codecs=vp8,opus",
-        "video/webm",
-      ].filter((type) => MediaRecorder.isTypeSupported(type));
-
-      const chunks: BlobPart[] = [];
-      let recorder: MediaRecorder | null = null;
-      let mimeType = "";
+      const frameCount = Math.max(1, Math.ceil(duration * fps));
+      const frameDurationUs = Math.round(1_000_000 / fps);
       const videoBitsPerSecond = Math.min(
         32_000_000,
         Math.max(16_000_000, Math.round(W * H * fps * 0.16))
       );
-      for (const candidate of recorderTypes) {
-        try {
-          recorder = new MediaRecorder(canvasStream, {
-            mimeType: candidate,
-            videoBitsPerSecond,
+
+      const VideoEncoderCtor = (window as any).VideoEncoder;
+      const VideoFrameCtor = (window as any).VideoFrame;
+      const AudioEncoderCtor = (window as any).AudioEncoder;
+      const AudioDataCtor = (window as any).AudioData;
+      if (!VideoEncoderCtor || !VideoFrameCtor) {
+        throw new Error("1080p60 export requires the latest Chrome or Edge.");
+      }
+
+      const codecCandidates = ["avc1.64002a", "avc1.4d402a", "avc1.42002a"];
+      let videoCodec = "";
+      let hardwareAcceleration: "prefer-hardware" | "no-preference" = "prefer-hardware";
+      for (const acceleration of ["prefer-hardware", "no-preference"] as const) {
+        for (const codec of codecCandidates) {
+          const support = await VideoEncoderCtor.isConfigSupported({
+            codec, width: W, height: H, bitrate: videoBitsPerSecond, framerate: fps,
+            hardwareAcceleration: acceleration,
+            avc: { format: "avc" },
           });
-          mimeType = candidate;
-          break;
-        } catch { /* Try the next browser-supported container/codec. */ }
+          if (support.supported) {
+            videoCodec = codec;
+            hardwareAcceleration = acceleration;
+            break;
+          }
+        }
+        if (videoCodec) break;
       }
-      if (!recorder || !mimeType) {
-        throw new Error("This browser could not start an MP4 or WebM video recorder. Use the latest Chrome or Edge.");
+      if (!videoCodec) throw new Error("This browser has no H.264 encoder for 1080p60.");
+
+      // Decode the original audio before frame seeking. If the browser cannot
+      // decode this container's audio, export remains valid but video-only.
+      let decodedAudio: AudioBuffer | null = null;
+      if (AudioEncoderCtor && AudioDataCtor) {
+        try {
+          setRenderStatus("Preparing original audio…");
+          const audioContext = new AudioContext();
+          decodedAudio = await audioContext.decodeAudioData(await video.file.arrayBuffer());
+          await audioContext.close();
+        } catch { decodedAudio = null; }
       }
-      activeRecorder = recorder;
-      const recordingDone = new Promise<void>((resolve, reject) => {
-        recorder.ondataavailable = (event) => { if (event.data.size) chunks.push(event.data); };
-        recorder.onerror = () => reject(new Error("The browser stopped while rendering the video."));
-        recorder.onstop = () => resolve();
+
+      const audioFramesPerChunk = 1024;
+      const audioFrameCount = decodedAudio
+        ? Math.min(decodedAudio.length, Math.ceil(duration * decodedAudio.sampleRate))
+        : 0;
+      const expectedAudioChunks = decodedAudio ? Math.ceil(audioFrameCount / audioFramesPerChunk) : 0;
+
+      const { Muxer, ArrayBufferTarget } = await import("mp4-muxer");
+      const target = new ArrayBufferTarget();
+      const muxer = new Muxer({
+        target,
+        video: { codec: "avc", width: W, height: H, frameRate: fps },
+        ...(decodedAudio ? {
+          audio: {
+            codec: "aac" as const,
+            numberOfChannels: decodedAudio.numberOfChannels,
+            sampleRate: decodedAudio.sampleRate,
+          },
+        } : {}),
+        fastStart: {
+          expectedVideoChunks: frameCount,
+          ...(decodedAudio ? { expectedAudioChunks } : {}),
+        },
       });
 
-      setRenderStatus("Rendering video with subtitles…");
+      let encoderError: Error | null = null;
+      const videoEncoder = new VideoEncoderCtor({
+        output: (chunk: EncodedVideoChunk, meta: EncodedVideoChunkMetadata) => {
+          muxer.addVideoChunk(chunk, meta);
+        },
+        error: (error: DOMException) => { encoderError = new Error(error.message); },
+      });
+      videoEncoder.configure({
+        codec: videoCodec,
+        width: W,
+        height: H,
+        bitrate: videoBitsPerSecond,
+        framerate: fps,
+        hardwareAcceleration,
+        latencyMode: "quality",
+        avc: { format: "avc" },
+      });
+
+      setRenderStatus("Encoding every frame at 1080p 60 FPS…");
       src.currentTime = 0;
-      paintFrame(ctx, src, W, H, 0);
-      // Do not use a timeslice for MP4. Concatenating timed MP4 fragments can
-      // produce a file that plays from the start but has no usable seek index.
-      recorder.start();
-      await src.play();
+      let outputFrameIndex = 0;
+      let lastMediaTime = 0;
+      const encodeCurrentCanvas = () => {
+        const frame = new VideoFrameCtor(canvas, {
+          timestamp: outputFrameIndex * frameDurationUs,
+          duration: frameDurationUs,
+        });
+        videoEncoder.encode(frame, { keyFrame: outputFrameIndex % (fps * 2) === 0 });
+        frame.close();
+        outputFrameIndex++;
+      };
+
       await new Promise<void>((resolve, reject) => {
-        let animationFrame = 0;
-        let settled = false;
-        const finish = () => {
-          if (settled) return;
-          settled = true;
-          cancelAnimationFrame(animationFrame);
-          src.removeEventListener("ended", finish);
-          resolve();
-        };
-        const draw = () => {
-          if (settled) return;
-          if (cancelRenderRef.current) {
-            src.pause();
-            finish();
-            return;
-          }
+        let finished = false;
+        let processing = false;
+        const finish = async () => {
+          if (finished) return;
+          finished = true;
           try {
-            paintFrame(ctx, src, W, H, src.currentTime);
-            setRenderProgress(Math.min(65, Math.round((src.currentTime / duration) * 65)));
-            animationFrame = requestAnimationFrame(draw);
+            // Extend the final decoded source frame to the exact clip duration.
+            while (outputFrameIndex < frameCount) encodeCurrentCanvas();
+            await videoEncoder.flush();
+            resolve();
           } catch (error) {
-            settled = true;
-            cancelAnimationFrame(animationFrame);
             reject(error);
           }
         };
-        src.addEventListener("ended", finish, { once: true });
-        animationFrame = requestAnimationFrame(draw);
+        const onEnded = () => {
+          if (!processing) void finish();
+        };
+        const onFrame = async (_now: number, metadata: VideoFrameCallbackMetadata) => {
+          if (finished) return;
+          processing = true;
+          try {
+            if (cancelRenderRef.current) {
+              src.pause();
+              await finish();
+              return;
+            }
+            lastMediaTime = Math.max(lastMediaTime, metadata.mediaTime);
+            paintFrame(ctx, src, W, H, lastMediaTime);
+
+            // Duplicate each decoded source frame only as needed to populate the
+            // fixed 60 FPS timeline. Every encoded timestamp is contiguous.
+            const framesDue = Math.min(
+              frameCount,
+              Math.floor((lastMediaTime + 1 / fps) * fps)
+            );
+            while (outputFrameIndex < framesDue) encodeCurrentCanvas();
+
+            if (videoEncoder.encodeQueueSize > 8) {
+              src.pause();
+              await videoEncoder.flush();
+              if (!src.ended && !cancelRenderRef.current) await src.play();
+            }
+            if (encoderError) throw encoderError;
+            setRenderProgress(Math.min(85, Math.round((outputFrameIndex / frameCount) * 85)));
+            processing = false;
+            if (src.ended || outputFrameIndex >= frameCount) {
+              await finish();
+            } else {
+              src.requestVideoFrameCallback(onFrame);
+            }
+          } catch (error) {
+            finished = true;
+            reject(error);
+          }
+        };
+        src.addEventListener("ended", onEnded, { once: true });
+        src.requestVideoFrameCallback(onFrame);
+        src.play().catch(reject);
       });
-      if (recorder.state !== "inactive") recorder.stop();
-      await recordingDone;
-      canvasStream.getTracks().forEach((track) => track.stop());
       if (cancelRenderRef.current) { flash("Export cancelled"); return; }
+      await videoEncoder.flush();
+      videoEncoder.close();
+      if (encoderError) throw encoderError;
 
-      const recording = new Blob(chunks, { type: mimeType });
-      if (!recording.size) throw new Error("The browser produced an empty video recording.");
+      if (decodedAudio && audioFrameCount > 0) {
+        setRenderStatus("Encoding original audio…");
+        let audioEncoderError: Error | null = null;
+        const audioEncoder = new AudioEncoderCtor({
+          output: (chunk: EncodedAudioChunk, meta: EncodedAudioChunkMetadata) => {
+            muxer.addAudioChunk(chunk, meta);
+          },
+          error: (error: DOMException) => { audioEncoderError = new Error(error.message); },
+        });
+        const audioConfig = {
+          codec: "mp4a.40.2",
+          sampleRate: decodedAudio.sampleRate,
+          numberOfChannels: decodedAudio.numberOfChannels,
+          bitrate: 192_000,
+        };
+        const audioSupport = await AudioEncoderCtor.isConfigSupported(audioConfig);
+        if (!audioSupport.supported) throw new Error("This browser cannot encode AAC audio.");
+        audioEncoder.configure(audioConfig);
 
-      // Native MP4 is already the requested final file; downloading it directly
-      // avoids the FFmpeg worker/CDN failure that previously reset the button.
-      const header = new Uint8Array(await recording.slice(0, 12).arrayBuffer());
-      const hasMp4Header = header.length >= 8 &&
-        String.fromCharCode(header[4], header[5], header[6], header[7]) === "ftyp";
-      if (mimeType.startsWith("video/mp4") && hasMp4Header) {
-        setRenderStatus("Finalizing seekable MP4…");
-        if (await isSeekableVideo(recording)) {
-          setRenderProgress(100);
-          setRenderStatus("Saving MP4…");
-          await saveFinishedVideo(recording);
-          setRenderStatus("");
-          flash("MP4 export complete");
-          return;
+        for (let offset = 0; offset < audioFrameCount; offset += audioFramesPerChunk) {
+          if (cancelRenderRef.current) { flash("Export cancelled"); return; }
+          const frames = Math.min(audioFramesPerChunk, audioFrameCount - offset);
+          const planar = new Float32Array(frames * decodedAudio.numberOfChannels);
+          for (let channel = 0; channel < decodedAudio.numberOfChannels; channel++) {
+            planar.set(
+              decodedAudio.getChannelData(channel).subarray(offset, offset + frames),
+              channel * frames
+            );
+          }
+          const audioData = new AudioDataCtor({
+            format: "f32-planar",
+            sampleRate: decodedAudio.sampleRate,
+            numberOfFrames: frames,
+            numberOfChannels: decodedAudio.numberOfChannels,
+            timestamp: Math.round((offset / decodedAudio.sampleRate) * 1_000_000),
+            data: planar,
+          });
+          audioEncoder.encode(audioData);
+          audioData.close();
+          if (audioEncoder.encodeQueueSize > 12) await audioEncoder.flush();
+          if (audioEncoderError) throw audioEncoderError;
         }
-
-        // Some browser builds emit fragmented MP4 without a usable duration or
-        // seek table. Remux it without re-encoding and move metadata to the
-        // beginning so the downloaded file is immediately seekable.
-        ff = await loadFFmpeg();
-        await ff.writeFile("recorded.mp4", new Uint8Array(await recording.arrayBuffer()));
-        setRenderStatus("Finalizing seekable MP4…");
-        const remuxExitCode = await ff.exec([
-          "-i", "recorded.mp4",
-          "-map", "0",
-          "-c", "copy",
-          "-movflags", "+faststart",
-          "output.mp4",
-        ]);
-        if (remuxExitCode !== 0) throw new Error("Could not finalize a seekable MP4.");
-        const remuxed = await ff.readFile("output.mp4");
-        if (!(remuxed instanceof Uint8Array) || remuxed.byteLength === 0) {
-          throw new Error("MP4 finalization did not produce a video file.");
-        }
-        const remuxedBytes = new Uint8Array(remuxed.byteLength);
-        remuxedBytes.set(remuxed);
-        const seekableBlob = new Blob([remuxedBytes.buffer], { type: "video/mp4" });
-        if (!(await isSeekableVideo(seekableBlob))) {
-          throw new Error("The finished MP4 could not be made seekable in this browser.");
-        }
-        setRenderProgress(100);
-        setRenderStatus("Saving MP4…");
-        await saveFinishedVideo(seekableBlob);
-        setRenderStatus("");
-        flash("MP4 export complete");
-        return;
+        await audioEncoder.flush();
+        audioEncoder.close();
+        if (audioEncoderError) throw audioEncoderError;
       }
 
-      // Older browsers record WebM, so only those browsers load FFmpeg to
-      // convert the completed recording to an MP4.
-      ff = await loadFFmpeg();
-      await ff.writeFile("rendered.webm", new Uint8Array(await recording.arrayBuffer()));
-
-      // Write the original file so FFmpeg can use its audio when the browser
-      // does not expose an audio track through captureStream.
-      const safeExt = (video.name.split(".").pop() || "mp4").toLowerCase().replace(/[^a-z0-9]/g, "") || "mp4";
-      const inputName = `input.${safeExt}`;
-      let hasAudioInput = false;
-      try {
-        setRenderStatus("Adding audio…");
-        const srcBytes = new Uint8Array(await video.file.arrayBuffer());
-        await ff.writeFile(inputName, srcBytes);
-        hasAudioInput = true;
-      } catch { hasAudioInput = false; }
-
-      // Convert the captioned recording to H.264 + AAC MP4.
-      setRenderStatus("Encoding MP4… (this part is CPU-only and may take a while)");
-      ff.on("progress", ({ progress }: { progress: number }) => {
-        if (progress >= 0 && progress <= 1) setRenderProgress(65 + Math.round(progress * 34));
-      });
-      const args = ["-i", "rendered.webm"];
-      if (hasAudioInput) {
-        args.push("-i", inputName, "-map", "0:v:0", "-map", "1:a:0?", "-shortest");
-      } else {
-        args.push("-map", "0:v:0", "-map", "0:a:0?");
-      }
-      args.push(
-        "-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "veryfast", "-crf", "23",
-        "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", "output.mp4"
-      );
-      const exitCode = await ff.exec(args);
-      if (exitCode !== 0) throw new Error(`MP4 encoding failed (FFmpeg exit code ${exitCode}).`);
-
-      if (cancelRenderRef.current) { flash("Export cancelled"); return; }
-
-      const out = await ff.readFile("output.mp4");
-      if (!(out instanceof Uint8Array) || out.byteLength === 0) {
-        throw new Error("MP4 encoding completed without producing a video file.");
-      }
-      const outputBytes = new Uint8Array(out.byteLength);
-      outputBytes.set(out);
-      const blob = new Blob([outputBytes.buffer], { type: "video/mp4" });
-      if (!(await isSeekableVideo(blob))) {
-        throw new Error("The finished MP4 is not seekable.");
-      }
+      setRenderStatus("Finalizing seekable MP4…");
+      muxer.finalize();
+      const blob = new Blob([target.buffer], { type: "video/mp4" });
+      if (!(await isSeekableVideo(blob))) throw new Error("The finished MP4 failed seek validation.");
 
       setRenderProgress(100);
       setRenderStatus("Saving MP4…");
@@ -1093,11 +1058,6 @@ export default function CaptionEditor() {
       setRenderError(message);
       flash("Export stopped — see the error message at the top");
     } finally {
-      try { ff?.terminate(); } catch { /* ignore */ }
-      try {
-        if (activeRecorder?.state !== "inactive") activeRecorder?.stop();
-      } catch { /* ignore */ }
-      activeStream?.getTracks().forEach((track) => track.stop());
       setRendering(false);
       setRenderStatus("");
       src.removeAttribute("src");
