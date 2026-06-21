@@ -884,10 +884,10 @@ export default function CaptionEditor() {
       if (!canvas.captureStream || typeof MediaRecorder === "undefined") {
         throw new Error("This browser cannot render video. Use the latest Chrome or Edge.");
       }
-      // Manual frame emission prevents browsers from reducing the output frame
-      // rate to the source video's FPS or the display's repaint cadence.
-      const canvasStream = canvas.captureStream(0);
-      const canvasTrack = canvasStream.getVideoTracks()[0] as CanvasCaptureMediaStreamTrack;
+      // Let the browser pace capture at 60 FPS. A manual 16 ms setInterval can
+      // queue expensive 1080p draws faster than they finish, producing bursts
+      // of duplicate frames followed by visible freezes.
+      const canvasStream = canvas.captureStream(fps);
       activeStream = canvasStream;
       const sourceWithCapture = src as HTMLVideoElement & {
         captureStream?: () => MediaStream;
@@ -915,8 +915,8 @@ export default function CaptionEditor() {
       let recorder: MediaRecorder | null = null;
       let mimeType = "";
       const videoBitsPerSecond = Math.min(
-        24_000_000,
-        Math.max(8_000_000, Math.round(W * H * fps * 0.12))
+        32_000_000,
+        Math.max(16_000_000, Math.round(W * H * fps * 0.16))
       );
       for (const candidate of recorderTypes) {
         try {
@@ -941,20 +941,22 @@ export default function CaptionEditor() {
       setRenderStatus("Rendering video with subtitles…");
       src.currentTime = 0;
       paintFrame(ctx, src, W, H, 0);
-      canvasTrack.requestFrame();
       // Do not use a timeslice for MP4. Concatenating timed MP4 fragments can
       // produce a file that plays from the start but has no usable seek index.
       recorder.start();
       await src.play();
       await new Promise<void>((resolve, reject) => {
-        const frameIntervalMs = 1000 / fps;
-        let frameTimer = 0;
+        let animationFrame = 0;
+        let settled = false;
         const finish = () => {
-          window.clearInterval(frameTimer);
+          if (settled) return;
+          settled = true;
+          cancelAnimationFrame(animationFrame);
           src.removeEventListener("ended", finish);
           resolve();
         };
         const draw = () => {
+          if (settled) return;
           if (cancelRenderRef.current) {
             src.pause();
             finish();
@@ -962,15 +964,16 @@ export default function CaptionEditor() {
           }
           try {
             paintFrame(ctx, src, W, H, src.currentTime);
-            canvasTrack.requestFrame();
             setRenderProgress(Math.min(65, Math.round((src.currentTime / duration) * 65)));
+            animationFrame = requestAnimationFrame(draw);
           } catch (error) {
-            window.clearInterval(frameTimer);
+            settled = true;
+            cancelAnimationFrame(animationFrame);
             reject(error);
           }
         };
         src.addEventListener("ended", finish, { once: true });
-        frameTimer = window.setInterval(draw, frameIntervalMs);
+        animationFrame = requestAnimationFrame(draw);
       });
       if (recorder.state !== "inactive") recorder.stop();
       await recordingDone;
