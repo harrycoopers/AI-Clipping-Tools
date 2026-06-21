@@ -619,7 +619,13 @@ export default function CaptionEditor() {
   const [renderError, setRenderError] = useState<string | null>(null);
   const [renderProgress, setRenderProgress] = useState(0);
   const [renderStatus, setRenderStatus] = useState("");
+  const [renderedVideoUrl, setRenderedVideoUrl] = useState<string | null>(null);
   const cancelRenderRef = useRef(false);
+  const renderedVideoUrlRef = useRef<string | null>(null);
+
+  useEffect(() => () => {
+    if (renderedVideoUrlRef.current) URL.revokeObjectURL(renderedVideoUrlRef.current);
+  }, []);
 
   // Word-wrap text to a max pixel width, capped at maxLines.
   function wrapLines(ctx: CanvasRenderingContext2D, text: string, maxW: number, maxLines: number): string[] {
@@ -793,8 +799,45 @@ export default function CaptionEditor() {
     let ff: any = null;
     let activeStream: MediaStream | null = null;
     let activeRecorder: MediaRecorder | null = null;
+    let outputHandle: any = null;
 
     try {
+      // Ask for the output file while the click still has user activation.
+      // Browsers may block a synthetic anchor click after a long render.
+      const showSaveFilePicker = (window as any).showSaveFilePicker as
+        | ((options: any) => Promise<any>)
+        | undefined;
+      if (showSaveFilePicker) {
+        setRenderStatus("Choose where to save the finished MP4…");
+        outputHandle = await showSaveFilePicker({
+          suggestedName: "captionforge-export.mp4",
+          types: [{
+            description: "MP4 video",
+            accept: { "video/mp4": [".mp4"] },
+          }],
+        });
+      }
+
+      const saveFinishedVideo = async (blob: Blob) => {
+        if (outputHandle) {
+          const writable = await outputHandle.createWritable();
+          await writable.write(blob);
+          await writable.close();
+        } else {
+          if (renderedVideoUrlRef.current) URL.revokeObjectURL(renderedVideoUrlRef.current);
+          const url = URL.createObjectURL(blob);
+          renderedVideoUrlRef.current = url;
+          setRenderedVideoUrl(url);
+          const a = document.createElement("a");
+          a.href = url;
+          a.download = "captionforge-export.mp4";
+          a.style.display = "none";
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+        }
+      };
+
       await document.fonts.ready;
       await new Promise<void>((resolve, reject) => {
         src.onloadedmetadata = () => resolve();
@@ -803,20 +846,20 @@ export default function CaptionEditor() {
         if (src.readyState >= HTMLMediaElement.HAVE_METADATA) resolve();
       });
 
-      // Even dimensions for H.264; cap longest side at 1280 to keep memory/time sane.
-      const MAX_SIDE = 1280;
-      const scale = Math.min(1, MAX_SIDE / Math.max(video.w, video.h));
+      // Export at 1080p for the clip's orientation while preserving its aspect
+      // ratio: landscape fits 1920x1080, portrait fits 1080x1920, and square
+      // exports at 1080x1080. Smaller sources are upscaled to the 1080p frame.
+      const maxW = video.w >= video.h ? 1920 : 1080;
+      const maxH = video.w >= video.h ? 1080 : 1920;
+      const scale = Math.min(maxW / video.w, maxH / video.h);
       const even = (n: number) => Math.max(2, Math.round((n * scale) / 2) * 2);
       const W = even(video.w), H = even(video.h);
       canvas.width = W; canvas.height = H;
       const ctx = canvas.getContext("2d", { willReadFrequently: true }) as CanvasRenderingContext2D | null;
       if (!ctx) throw new Error("Canvas 2D context unavailable in this browser");
 
-      const fps = 30;
+      const fps = 60;
       const duration = video.duration;
-
-      // Load the encoder first so a network problem stops here with a clear message.
-      ff = await loadFFmpeg();
 
       // Record the composited canvas as one compressed stream. Keeping every
       // frame as a separate JPEG in FFmpeg's WASM filesystem exhausted browser
@@ -824,7 +867,10 @@ export default function CaptionEditor() {
       if (!canvas.captureStream || typeof MediaRecorder === "undefined") {
         throw new Error("This browser cannot render video. Use the latest Chrome or Edge.");
       }
-      const canvasStream = canvas.captureStream(fps);
+      // Manual frame emission prevents browsers from reducing the output frame
+      // rate to the source video's FPS or the display's repaint cadence.
+      const canvasStream = canvas.captureStream(0);
+      const canvasTrack = canvasStream.getVideoTracks()[0] as CanvasCaptureMediaStreamTrack;
       activeStream = canvasStream;
       const sourceWithCapture = src as HTMLVideoElement & {
         captureStream?: () => MediaStream;
@@ -837,18 +883,37 @@ export default function CaptionEditor() {
         } catch { /* FFmpeg can fall back to audio from the source file. */ }
       }
 
-      const mimeType = [
+      // Current Chrome/Edge versions can record H.264 MP4 directly. Prefer that
+      // path so clicking Export does not depend on a 30 MB FFmpeg download.
+      const recorderTypes = [
+        "video/mp4;codecs=avc1.42E01E,mp4a.40.2",
+        "video/mp4;codecs=avc1.42E01E",
+        "video/mp4",
         "video/webm;codecs=vp9,opus",
         "video/webm;codecs=vp8,opus",
         "video/webm",
-      ].find((type) => MediaRecorder.isTypeSupported(type));
-      if (!mimeType) throw new Error("This browser does not provide a compatible video recorder.");
+      ].filter((type) => MediaRecorder.isTypeSupported(type));
 
       const chunks: BlobPart[] = [];
-      const recorder = new MediaRecorder(canvasStream, {
-        mimeType,
-        videoBitsPerSecond: Math.min(12_000_000, Math.max(2_500_000, W * H * 5)),
-      });
+      let recorder: MediaRecorder | null = null;
+      let mimeType = "";
+      const videoBitsPerSecond = Math.min(
+        24_000_000,
+        Math.max(8_000_000, Math.round(W * H * fps * 0.12))
+      );
+      for (const candidate of recorderTypes) {
+        try {
+          recorder = new MediaRecorder(canvasStream, {
+            mimeType: candidate,
+            videoBitsPerSecond,
+          });
+          mimeType = candidate;
+          break;
+        } catch { /* Try the next browser-supported container/codec. */ }
+      }
+      if (!recorder || !mimeType) {
+        throw new Error("This browser could not start an MP4 or WebM video recorder. Use the latest Chrome or Edge.");
+      }
       activeRecorder = recorder;
       const recordingDone = new Promise<void>((resolve, reject) => {
         recorder.ondataavailable = (event) => { if (event.data.size) chunks.push(event.data); };
@@ -859,12 +924,14 @@ export default function CaptionEditor() {
       setRenderStatus("Rendering video with subtitles…");
       src.currentTime = 0;
       paintFrame(ctx, src, W, H, 0);
+      canvasTrack.requestFrame();
       recorder.start(1000);
       await src.play();
       await new Promise<void>((resolve, reject) => {
-        let raf = 0;
+        const frameIntervalMs = 1000 / fps;
+        let frameTimer = 0;
         const finish = () => {
-          cancelAnimationFrame(raf);
+          window.clearInterval(frameTimer);
           src.removeEventListener("ended", finish);
           resolve();
         };
@@ -876,15 +943,15 @@ export default function CaptionEditor() {
           }
           try {
             paintFrame(ctx, src, W, H, src.currentTime);
+            canvasTrack.requestFrame();
             setRenderProgress(Math.min(65, Math.round((src.currentTime / duration) * 65)));
-            raf = requestAnimationFrame(draw);
           } catch (error) {
-            cancelAnimationFrame(raf);
+            window.clearInterval(frameTimer);
             reject(error);
           }
         };
         src.addEventListener("ended", finish, { once: true });
-        draw();
+        frameTimer = window.setInterval(draw, frameIntervalMs);
       });
       if (recorder.state !== "inactive") recorder.stop();
       await recordingDone;
@@ -893,6 +960,24 @@ export default function CaptionEditor() {
 
       const recording = new Blob(chunks, { type: mimeType });
       if (!recording.size) throw new Error("The browser produced an empty video recording.");
+
+      // Native MP4 is already the requested final file; downloading it directly
+      // avoids the FFmpeg worker/CDN failure that previously reset the button.
+      const header = new Uint8Array(await recording.slice(0, 12).arrayBuffer());
+      const hasMp4Header = header.length >= 8 &&
+        String.fromCharCode(header[4], header[5], header[6], header[7]) === "ftyp";
+      if (mimeType.startsWith("video/mp4") && hasMp4Header) {
+        setRenderProgress(100);
+        setRenderStatus("Saving MP4…");
+        await saveFinishedVideo(recording);
+        setRenderStatus("");
+        flash("MP4 export complete");
+        return;
+      }
+
+      // Older browsers record WebM, so only those browsers load FFmpeg to
+      // convert the completed recording to an MP4.
+      ff = await loadFFmpeg();
       await ff.writeFile("rendered.webm", new Uint8Array(await recording.arrayBuffer()));
 
       // Write the original file so FFmpeg can use its audio when the browser
@@ -936,10 +1021,15 @@ export default function CaptionEditor() {
       const blob = new Blob([outputBytes.buffer], { type: "video/mp4" });
 
       setRenderProgress(100);
+      setRenderStatus("Saving MP4…");
+      await saveFinishedVideo(blob);
       setRenderStatus("");
-      downloadBlob("captionforge-export.mp4", blob);
-      flash("MP4 export complete — download started");
+      flash("MP4 export complete");
     } catch (err: unknown) {
+      if (err instanceof DOMException && err.name === "AbortError") {
+        flash("Export cancelled");
+        return;
+      }
       const message = err instanceof Error ? err.message : "Export failed";
       setRenderError(message);
       flash("Export stopped — see the error message at the top");
@@ -1366,6 +1456,15 @@ export default function CaptionEditor() {
         <div style={{ position: "fixed", top: 64, left: "50%", transform: "translateX(-50%)", background: hexA("#3a1018", 0.92), border: `1px solid ${C.pink}`, color: C.text, padding: "9px 16px", borderRadius: 10, fontSize: 12.5, zIndex: 89, maxWidth: 600, textAlign: "center" }}>
           {renderError}
         </div>
+      )}
+      {renderedVideoUrl && !rendering && (
+        <a
+          href={renderedVideoUrl}
+          download="captionforge-export.mp4"
+          style={{ position: "fixed", top: renderError ? 110 : 64, left: "50%", transform: "translateX(-50%)", background: C.amber, color: "#1a1300", padding: "10px 18px", borderRadius: 10, fontSize: 13, fontWeight: 800, zIndex: 90, textDecoration: "none", boxShadow: "0 12px 36px rgba(0,0,0,.45)" }}
+        >
+          Download finished MP4
+        </a>
       )}
       {transcribeError && (
         <div style={{ position: "fixed", top: 64, left: "50%", transform: "translateX(-50%)", background: hexA("#000", 0.85), border: `1px solid ${C.line2}`, color: C.dim, padding: "9px 16px", borderRadius: 10, fontSize: 12.5, zIndex: 89, maxWidth: 560, textAlign: "center" }}>
