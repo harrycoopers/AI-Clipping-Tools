@@ -717,7 +717,6 @@ export default function CaptionEditor() {
     if (active) drawCaptionToCanvas(ctx, W, H, active, styleFor(active), t);
   }
 
-<<<<<<< HEAD
   // Lazily load FFmpeg.wasm (single-thread core) from a CDN. Core + worker are
   // fetched as blob URLs so this works on GitHub Pages (no special headers, no
   // bundler/basePath worker issues). FFmpeg encodes entirely on the CPU in
@@ -737,207 +736,6 @@ export default function CaptionEditor() {
     return ff;
   }
 
-=======
-  // Decode the source file's audio to PCM, then AAC-encode it into the muxer.
-  async function encodeSourceAudio(muxer: any): Promise<{ channels: number; sampleRate: number } | null> {
-    if (!video) return null;
-    try {
-      const AudioEncoderCtor = (window as any).AudioEncoder;
-      const AudioDataCtor = (window as any).AudioData;
-      if (!AudioEncoderCtor || !AudioDataCtor) return null;
-      const arr = await fetch(video.url).then((r) => r.arrayBuffer());
-      const AC: typeof AudioContext = (window as any).AudioContext || (window as any).webkitAudioContext;
-      const ac = new AC();
-      const buf = await ac.decodeAudioData(arr.slice(0));
-      ac.close();
-      const numCh = buf.numberOfChannels;
-      const sampleRate = buf.sampleRate;
-
-      const audioEncoder = new AudioEncoderCtor({
-        output: (chunk: any, meta: any) => muxer.addAudioChunk(chunk, meta),
-        error: (e: any) => console.warn("audio encode error", e),
-      });
-      audioEncoder.configure({ codec: "mp4a.40.2", numberOfChannels: numCh, sampleRate, bitrate: 128_000 });
-
-      const total = buf.length;
-      const block = 4096;
-      for (let off = 0; off < total; off += block) {
-        if (cancelRenderRef.current) break;
-        const frames = Math.min(block, total - off);
-        const data = new Float32Array(frames * numCh); // f32-planar: ch0 block, ch1 block, ...
-        for (let ch = 0; ch < numCh; ch++) {
-          data.set(buf.getChannelData(ch).subarray(off, off + frames), ch * frames);
-        }
-        const ad = new AudioDataCtor({
-          format: "f32-planar", sampleRate, numberOfFrames: frames, numberOfChannels: numCh,
-          timestamp: Math.round((off / sampleRate) * 1e6), data,
-        });
-        audioEncoder.encode(ad);
-        ad.close();
-      }
-      await audioEncoder.flush();
-      return { channels: numCh, sampleRate };
-    } catch (e) {
-      console.warn("audio path unavailable, exporting video-only", e);
-      return null;
-    }
-  }
-
-  // True MP4 (H.264 + AAC) entirely in the browser via WebCodecs + mp4-muxer.
-  async function encodeMP4(src: HTMLVideoElement, canvas: HTMLCanvasElement, ctx: CanvasRenderingContext2D, fps: number): Promise<Blob> {
-    if (!video) throw new Error("no video");
-    const W = canvas.width, H = canvas.height;
-    const VideoEncoderCtor = (window as any).VideoEncoder;
-    const VideoFrameCtor = (window as any).VideoFrame;
-    if (!VideoEncoderCtor || !VideoFrameCtor) throw new Error("WebCodecs not available");
-
-    // Pick an H.264 profile/level that the encoder supports for this size.
-    // Force the SOFTWARE H.264 encoder. Hardware (GPU) encoders are the usual
-    // cause of STATUS_BREAKPOINT tab crashes during export on some machines;
-    // software encoding sidesteps the GPU path entirely. We probe a few
-    // profile/level strings and pick the first the browser actually supports.
-    const bitrate = Math.round(W * H * fps * 0.14);
-    const candidates = ["avc1.42E028", "avc1.4D4028", "avc1.640028", "avc1.42001f"];
-    const accels: ("prefer-software" | "no-preference")[] = ["prefer-software", "no-preference"];
-    let chosenConfig: any = null;
-    for (const hardwareAcceleration of accels) {
-      for (const c of candidates) {
-        const cfg = { codec: c, width: W, height: H, bitrate, framerate: fps, hardwareAcceleration };
-        try {
-          const s = await VideoEncoderCtor.isConfigSupported(cfg);
-          if (s && s.supported) { chosenConfig = cfg; break; }
-        } catch { /* try next */ }
-      }
-      if (chosenConfig) break;
-    }
-    if (!chosenConfig) throw new Error("H.264 encoding not supported here");
-
-    const { Muxer, ArrayBufferTarget } = await import("mp4-muxer");
-
-    // Audio first (best-effort) so we know whether to declare an audio track.
-    // We build the muxer after probing audio support.
-    let audioInfo: { channels: number; sampleRate: number } | null = null;
-    try {
-      const arr = await fetch(video.url).then((r) => r.arrayBuffer());
-      const AC: typeof AudioContext = (window as any).AudioContext || (window as any).webkitAudioContext;
-      const ac = new AC();
-      const probe = await ac.decodeAudioData(arr.slice(0));
-      audioInfo = { channels: probe.numberOfChannels, sampleRate: probe.sampleRate };
-      ac.close();
-    } catch { audioInfo = null; }
-
-    const muxer: any = new Muxer({
-      target: new ArrayBufferTarget(),
-      video: { codec: "avc", width: W, height: H },
-      ...(audioInfo ? { audio: { codec: "aac" as const, numberOfChannels: audioInfo.channels, sampleRate: audioInfo.sampleRate } } : {}),
-      fastStart: "in-memory",
-    });
-
-    const videoEncoder = new VideoEncoderCtor({
-      output: (chunk: any, meta: any) => muxer.addVideoChunk(chunk, meta),
-      error: (e: any) => console.warn("video encode error", e),
-    });
-    videoEncoder.configure(chosenConfig);
-
-    if (audioInfo) await encodeSourceAudio(muxer);
-
-    // Capture frames in real time, throttled to `fps`, via requestVideoFrameCallback
-    // (falls back to requestAnimationFrame).
-    const minDelta = 1 / fps - 0.001;
-    let lastT = -1, frameCount = 0;
-    src.currentTime = 0;
-    await src.play();
-
-    await new Promise<void>((resolve) => {
-      let finished = false;
-      let watchdog = 0;
-      const finish = () => {
-        if (finished) return;
-        finished = true;
-        src.onended = null;
-        if (watchdog) clearInterval(watchdog);
-        resolve();
-      };
-      const handle = (t: number) => {
-        if (finished) return;
-        if (cancelRenderRef.current) { finish(); return; }
-        // Backpressure: if the (software) encoder is falling behind, skip this
-        // frame rather than queueing unbounded work, which would spike memory.
-        if (t - lastT >= minDelta && videoEncoder.encodeQueueSize < 12) {
-          paintFrame(ctx, src, W, H, t);
-          const frame = new VideoFrameCtor(canvas, { timestamp: Math.round(t * 1e6) });
-          videoEncoder.encode(frame, { keyFrame: frameCount % 60 === 0 });
-          frame.close();
-          lastT = t; frameCount++;
-          setRenderProgress(Math.min(99, Math.round((t / video.duration) * 100)));
-        }
-        if (src.ended || t >= video.duration - 0.05) { finish(); return; }
-        next();
-      };
-      // The frame callback stops firing when the video ends, so finish on the
-      // `ended` event too — and a timer catches stalls and honours Cancel even
-      // if no callback is running.
-      src.onended = finish;
-      watchdog = window.setInterval(() => {
-        if (cancelRenderRef.current || src.ended || src.currentTime >= video.duration - 0.05) finish();
-      }, 250);
-
-      const rVFC = (src as any).requestVideoFrameCallback?.bind(src);
-      const next = rVFC
-        ? () => { if (!finished) rVFC((_now: number, meta: any) => handle(meta?.mediaTime ?? src.currentTime)); }
-        : () => { if (!finished) requestAnimationFrame(() => handle(src.currentTime)); };
-      next();
-    });
-
-    src.pause();
-    if (cancelRenderRef.current) { try { videoEncoder.close(); } catch { /* ignore */ } throw new Error("Export cancelled"); }
-    // Guard the final flush so a wedged encoder can't hang the UI forever.
-    await Promise.race([
-      videoEncoder.flush(),
-      new Promise((_, rej) => setTimeout(() => rej(new Error("Encoder timed out while finishing")), 30000)),
-    ]);
-    muxer.finalize();
-    const { buffer } = muxer.target as { buffer: ArrayBuffer };
-    return new Blob([buffer], { type: "video/mp4" });
-  }
-
-  // WebM fallback (only for browsers without WebCodecs) via MediaRecorder.
-  async function encodeWebM(src: HTMLVideoElement, canvas: HTMLCanvasElement, ctx: CanvasRenderingContext2D, fps: number): Promise<Blob> {
-    if (!video) throw new Error("no video");
-    const W = canvas.width, H = canvas.height;
-    const vStream = canvas.captureStream(fps);
-    try {
-      const el = src as any;
-      const a = el.captureStream ? el.captureStream() : el.mozCaptureStream?.();
-      a?.getAudioTracks().forEach((tr: MediaStreamTrack) => vStream.addTrack(tr));
-    } catch { /* video-only */ }
-    const mimeType = ["video/webm;codecs=vp8,opus", "video/webm;codecs=vp8", "video/webm"]
-      .find((m) => MediaRecorder.isTypeSupported(m));
-    if (!mimeType) throw new Error("This browser cannot record video");
-    const chunks: BlobPart[] = [];
-    const rec = new MediaRecorder(vStream, { mimeType, videoBitsPerSecond: Math.round(W * H * fps * 0.12) });
-    rec.ondataavailable = (e) => { if (e.data.size) chunks.push(e.data); };
-    const done = new Promise<Blob>((resolve) => { rec.onstop = () => resolve(new Blob(chunks, { type: "video/webm" })); });
-    rec.start(100);
-    src.currentTime = 0;
-    await src.play();
-    await new Promise<void>((resolve) => {
-      const step = () => {
-        if (cancelRenderRef.current) { resolve(); return; }
-        const t = src.currentTime;
-        paintFrame(ctx, src, W, H, t);
-        setRenderProgress(Math.min(99, Math.round((t / video.duration) * 100)));
-        if (src.ended || t >= video.duration - 0.05) { resolve(); return; }
-        requestAnimationFrame(step);
-      };
-      requestAnimationFrame(step);
-    });
-    src.pause();
-    rec.stop();
-    return done;
-  }
-
->>>>>>> 7d27d8a6b1a83723b50cf130b53ee8ac2a6834b6
   async function renderVideo() {
     if (!video) return;
     setRendering(true);
@@ -951,10 +749,7 @@ export default function CaptionEditor() {
     src.muted = true;
     (src as any).playsInline = true;
     const canvas = document.createElement("canvas");
-<<<<<<< HEAD
     let ff: any = null;
-=======
->>>>>>> 7d27d8a6b1a83723b50cf130b53ee8ac2a6834b6
 
     try {
       await document.fonts.ready;
@@ -963,14 +758,8 @@ export default function CaptionEditor() {
         src.onerror = () => rej(new Error("Could not read the video for export"));
       });
 
-<<<<<<< HEAD
       // Even dimensions for H.264; cap longest side at 1280 to keep memory/time sane.
       const MAX_SIDE = 1280;
-=======
-      // Cap longest side at 1280 (keeps the encoder well within H.264 limits and
-      // avoids the heavy-encode renderer crash). H.264 also requires even dims.
-      const MAX_SIDE = 960;
->>>>>>> 7d27d8a6b1a83723b50cf130b53ee8ac2a6834b6
       const scale = Math.min(1, MAX_SIDE / Math.max(video.w, video.h));
       const even = (n: number) => Math.max(2, Math.round((n * scale) / 2) * 2);
       const W = even(video.w), H = even(video.h);
@@ -979,7 +768,6 @@ export default function CaptionEditor() {
       if (!ctx) throw new Error("Canvas 2D context unavailable in this browser");
 
       const fps = 30;
-<<<<<<< HEAD
       const duration = video.duration;
       const frameCount = Math.max(1, Math.ceil(duration * fps));
 
@@ -1040,30 +828,6 @@ export default function CaptionEditor() {
       const out = await ff.readFile("output.mp4");
       const blob = new Blob([out as any], { type: "video/mp4" });
 
-=======
-      const hasWebCodecs = typeof window !== "undefined" && !!(window as any).VideoEncoder && !!(window as any).VideoFrame;
-
-      let blob: Blob;
-      let ext: "mp4" | "webm";
-      if (hasWebCodecs) {
-        try {
-          blob = await encodeMP4(src, canvas, ctx, fps);
-          ext = "mp4";
-        } catch (mp4err) {
-          console.warn("MP4 export failed, falling back to WebM:", mp4err);
-          if (cancelRenderRef.current) { flash("Export cancelled"); return; }
-          src.currentTime = 0;
-          blob = await encodeWebM(src, canvas, ctx, fps);
-          ext = "webm";
-        }
-      } else {
-        blob = await encodeWebM(src, canvas, ctx, fps);
-        ext = "webm";
-      }
-
-      if (cancelRenderRef.current) { flash("Export cancelled"); return; }
-
->>>>>>> 7d27d8a6b1a83723b50cf130b53ee8ac2a6834b6
       setRenderProgress(100);
       setRenderStatus("");
       const url = URL.createObjectURL(blob);
@@ -1485,14 +1249,11 @@ export default function CaptionEditor() {
         </div>
       </div>
 
-<<<<<<< HEAD
       {rendering && renderStatus && (
         <div style={{ position: "fixed", top: 64, left: "50%", transform: "translateX(-50%)", background: hexA("#0a1a2a", 0.92), border: `1px solid ${C.blue}`, color: C.text, padding: "9px 16px", borderRadius: 10, fontSize: 12.5, zIndex: 89, maxWidth: 600, textAlign: "center" }}>
           {renderStatus} {renderProgress > 0 ? `(${renderProgress}%)` : ""}
         </div>
       )}
-=======
->>>>>>> 7d27d8a6b1a83723b50cf130b53ee8ac2a6834b6
       {renderError && (
         <div style={{ position: "fixed", top: 64, left: "50%", transform: "translateX(-50%)", background: hexA("#3a1018", 0.92), border: `1px solid ${C.pink}`, color: C.text, padding: "9px 16px", borderRadius: 10, fontSize: 12.5, zIndex: 89, maxWidth: 600, textAlign: "center" }}>
           {renderError}
