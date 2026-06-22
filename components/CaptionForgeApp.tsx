@@ -19,7 +19,7 @@ const colors = {
 
 export default function CaptionForgeApp() {
   const [view, setView] = useState<View>("editor");
-  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
 
   return (
     <div className={`cf-shell${sidebarOpen ? "" : " cf-sidebar-collapsed"}`}>
