@@ -167,6 +167,7 @@ describe("ORIGINAL_DEFAULT matches the spec", () => {
 describe("createSubtitleSegments", () => {
   it("removes cue-only non-speech annotations", () => {
     expect(cleanTranscriptChunkText("[Music]")).toBe("");
+    expect(cleanTranscriptChunkText("[blank_audio]")).toBe("");
     expect(cleanTranscriptChunkText("♪ music ♪")).toBe("");
     expect(cleanTranscriptChunkText("(applause)")).toBe("");
     expect(cleanTranscriptChunkText("I love music")).toBe("I love music");

@@ -28,6 +28,10 @@ https://harrycoopers.github.io/AI-Clipping-Tools/
 - **In-browser MP4 export** — captions are burned in with Canvas and encoded
   with WebCodecs into a fast-start, seek-validated MP4 that downloads locally.
 - SRT/VTT import, SRT + project-JSON export
+- Home dashboard with Subtitle Editor and Video Downloader sections
+- Optional companion downloader for permitted YouTube, YouTube Shorts, TikTok,
+  Twitch VOD, and Kick VOD/clip sources, up to the source's available
+  1080p/60fps quality
 
 ## Browser requirements and limitations
 
@@ -40,8 +44,7 @@ https://harrycoopers.github.io/AI-Clipping-Tools/
 - MP4 export requires WebCodecs H.264/AAC support. Current Chrome and Edge have
   the strongest support.
 
-The AI Voiceover, Content Ideas and Video Downloader sections described in the
-brief are **not built yet** — they are separate features to add next.
+The AI Voiceover and Content Ideas sections are not built yet.
 
 ---
 
@@ -52,7 +55,19 @@ npm install
 npm run dev          # http://localhost:3000  (dev has no base path)
 ```
 
-No environment variables or API keys are needed.
+No environment variables or API keys are needed for the subtitle editor.
+
+## Video Downloader service
+
+Install `yt-dlp` and FFmpeg so both commands are on your `PATH`, then run:
+
+```bash
+npm run downloader:server
+```
+
+The app connects to `http://127.0.0.1:4317` by default. For a deployed frontend,
+host the service separately over HTTPS and set `NEXT_PUBLIC_DOWNLOADER_API_URL`
+before building. Download only content you own or have permission to use.
 
 ## Static build
 

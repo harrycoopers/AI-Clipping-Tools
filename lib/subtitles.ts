@@ -60,7 +60,7 @@ export interface TranscriptChunk {
   timestamp?: [number | null, number | null];
 }
 
-const NON_SPEECH_CUE = /^(?:music|musical interlude|instrumental|background music|applause|clapping|laughter|laughing|cheering|crowd noise|noise|silence)$/i;
+const NON_SPEECH_CUE = /^(?:blank_audio|blank audio|music|musical interlude|instrumental|background music|applause|clapping|laughter|laughing|cheering|crowd noise|noise|silence)$/i;
 
 /** Remove cue-only sound descriptions while preserving ordinary speech. */
 export function cleanTranscriptChunkText(text: string): string {

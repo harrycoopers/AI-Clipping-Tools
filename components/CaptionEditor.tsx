@@ -375,7 +375,7 @@ const Section = ({ title, icon, children, defaultOpen = true }: {
 // ===========================================================================
 //  Main app
 // ===========================================================================
-export default function CaptionEditor() {
+export default function CaptionEditor({ onHome }: { onHome?: () => void }) {
   // ---- presets ----
   const [presets, setPresets] = useState<Preset[]>(() => {
     const lib = PRESET_LIBRARY.map((p) => ({ id: uid(), name: p.name, builtin: false, style: p.style }));
@@ -1459,9 +1459,9 @@ export default function CaptionEditor() {
         {/* ============ top bar ============ */}
         <header style={{ display: "flex", alignItems: "center", gap: 14, padding: "12px 18px", borderBottom: `1px solid ${C.line}`, background: C.bg2 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 9 }}>
-            <div style={{ width: 30, height: 30, borderRadius: 9, background: C.amber, display: "grid", placeItems: "center", boxShadow: `0 0 22px ${hexA(C.amber, 0.4)}` }}>
+            <button onClick={onHome} title="Back to home" style={{ width: 30, height: 30, border: "none", borderRadius: 9, background: C.amber, display: "grid", placeItems: "center", boxShadow: `0 0 22px ${hexA(C.amber, 0.4)}`, cursor: onHome ? "pointer" : "default", padding: 0 }}>
               <Type size={17} color="#1a1300" strokeWidth={2.6} />
-            </div>
+            </button>
             <div>
               <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontWeight: 700, fontSize: 16, letterSpacing: "-.3px" }}>
                 Caption<span style={{ color: C.amber }}>Forge</span>

@@ -1,5 +1,5 @@
-import CaptionEditor from "@/components/CaptionEditor";
+import CaptionForgeApp from "@/components/CaptionForgeApp";
 
 export default function Home() {
-  return <CaptionEditor />;
+  return <CaptionForgeApp />;
 }
