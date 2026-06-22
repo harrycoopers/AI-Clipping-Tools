@@ -6,7 +6,7 @@ import {
   Merge, Download, Star, Lock, Unlock, RotateCcw, Search, Type,
   Check, X, FileUp, FileDown, Crosshair, Eye, EyeOff, Film,
   Sparkles, AlignLeft, AlignCenter, AlignRight, Pencil, Layers,
-  ChevronUp, ChevronDown as MoveDown, RefreshCw,
+  ChevronUp, ChevronDown as MoveDown, RefreshCw, ArrowLeft,
 } from "lucide-react";
 import {
   ORIGINAL_DEFAULT, applyCaps, srtTime, parseSubs as parseSubsLib,
@@ -475,7 +475,8 @@ export default function CaptionEditor({ onHome, incomingVideo, autoTranscribeTok
         if (typeof project.autoChoiceId === "string") setAutoChoiceId(project.autoChoiceId);
         if (typeof project.activePresetId === "string") setActivePresetId(project.activePresetId);
         if (typeof project.applyDefaultToNew === "boolean") setApplyDefaultToNew(project.applyDefaultToNew);
-        if (Array.isArray(project.segments)) setSegments(project.segments);
+        // Video files cannot be restored from localStorage. Restoring captions
+        // without their source video leaves stale subtitles in a new session.
         if (typeof project.language === "string") setLanguage(project.language);
         if (["fast", "balanced", "accurate"].includes(project.transcriptionModel)) {
           setTranscriptionModel(project.transcriptionModel);
@@ -511,7 +512,6 @@ export default function CaptionEditor({ onHome, incomingVideo, autoTranscribeTok
         autoChoiceId,
         activePresetId,
         applyDefaultToNew,
-        segments,
         language,
         transcriptionModel,
         preferWebGpu,
@@ -523,7 +523,7 @@ export default function CaptionEditor({ onHome, incomingVideo, autoTranscribeTok
     }
   }, [
     presets, defaultId, autoChoiceId, activePresetId, applyDefaultToNew,
-    segments, language, transcriptionModel, preferWebGpu, customFonts, portraitLayout,
+    language, transcriptionModel, preferWebGpu, customFonts, portraitLayout,
   ]);
 
   useEffect(() => () => transcriptionWorkerRef.current?.terminate(), []);
@@ -540,6 +540,25 @@ export default function CaptionEditor({ onHome, incomingVideo, autoTranscribeTok
   );
 
   // ---- video upload ----
+  function resetForNewVideo(showMessage = true) {
+    if (transcribing) cancelTranscription();
+    if (rendering) cancelRender();
+    if (video) URL.revokeObjectURL(video.url);
+    setVideo(null);
+    setSegments([]);
+    setSelectedSeg(null);
+    setCurrentTime(0);
+    setPlaying(false);
+    setAutoOpen(false);
+    setTranscriptionOpen(false);
+    setTranscribeError(null);
+    setLastTranscriptionFailed(false);
+    setPortraitLayout(createDefaultPortraitLayout());
+    setSelectedPortraitRegionId("webcam");
+    history.current = { past: [], future: [] };
+    if (showMessage) flash("Ready for another video");
+  }
+
   function loadVideo(file: File | undefined | null) {
     if (!file) return;
     const ok = ["video/mp4", "video/quicktime", "video/webm", "video/x-msvideo", "video/x-matroska"];
@@ -548,6 +567,7 @@ export default function CaptionEditor({ onHome, incomingVideo, autoTranscribeTok
       return;
     }
     if (file.size > 600 * 1024 * 1024) { flash("File too large for the in-browser preview (max 600MB)"); return; }
+    resetForNewVideo(false);
     const url = URL.createObjectURL(file);
     const v = document.createElement("video");
     v.preload = "metadata";
@@ -555,7 +575,10 @@ export default function CaptionEditor({ onHome, incomingVideo, autoTranscribeTok
       setVideo({ url, file, name: file.name, size: file.size, duration: v.duration, w: v.videoWidth, h: v.videoHeight });
       setCurrentTime(0); setPlaying(false);
     };
-    v.onerror = () => flash("Could not read this video file");
+    v.onerror = () => {
+      URL.revokeObjectURL(url);
+      flash("Could not read this video file");
+    };
     v.src = url;
   }
 
@@ -727,7 +750,7 @@ export default function CaptionEditor({ onHome, incomingVideo, autoTranscribeTok
       }
       const audio = await prepareAudio(video.file);
       if (!transcriptionWorkerRef.current) {
-        transcriptionWorkerRef.current = new Worker(asset("/transcription.worker.mjs?v=9"), { type: "module" });
+        transcriptionWorkerRef.current = new Worker(asset("/transcription.worker.mjs?v=10"), { type: "module" });
       }
       const worker = transcriptionWorkerRef.current;
       const result = await new Promise<{ chunks: { text: string; timestamp?: [number | null, number | null] }[]; text: string; device: "webgpu" | "wasm"; wordTimestamps: boolean; wordTimingQuality: "word" | "recovered-word" | "none" }>((resolve, reject) => {
@@ -1629,6 +1652,12 @@ export default function CaptionEditor({ onHome, incomingVideo, autoTranscribeTok
 
           <div style={{ flex: 1 }} />
 
+          {video && (
+            <Btn kind="ghost" onClick={() => resetForNewVideo()} title="Close this video and upload another">
+              <ArrowLeft size={14} /> Back / New video
+            </Btn>
+          )}
+
           {/* Auto-generate + preset dropdown */}
           <div style={{ position: "relative" }}>
             <div style={{ display: "flex", alignItems: "stretch", borderRadius: 10, overflow: "hidden", border: `1px solid ${C.amber}` }}>
@@ -1883,7 +1912,7 @@ export default function CaptionEditor({ onHome, incomingVideo, autoTranscribeTok
                 <span>{video.w}×{video.h}</span>
                 <span>{aspect}</span>
                 <span>{fmt(video.duration)}</span>
-                <button onClick={() => { URL.revokeObjectURL(video.url); setVideo(null); setSegments([]); }} style={{ marginLeft: "auto", background: "none", border: "none", color: C.pink, cursor: "pointer", fontSize: 11.5, fontWeight: 600 }}>Remove video</button>
+                <button onClick={() => resetForNewVideo()} style={{ marginLeft: "auto", background: "none", border: "none", color: C.pink, cursor: "pointer", fontSize: 11.5, fontWeight: 600 }}>Back to upload</button>
               </div>
             )}
           </main>
@@ -2097,7 +2126,10 @@ export default function CaptionEditor({ onHome, incomingVideo, autoTranscribeTok
               <div style={{ color: C.faint, fontSize: 11.5, marginTop: 7 }}>
                 {transcriptionModel === "fast" && "Smallest download and lowest memory use."}
                 {transcriptionModel === "balanced" && "Recommended quality and speed for most devices."}
-                {transcriptionModel === "accurate" && "Largest model; may exceed memory on phones or low-memory computers."}
+                {transcriptionModel === "accurate" && "Largest local model with beam-search decoding; may exceed memory on phones or low-memory computers."}
+              </div>
+              <div style={{ color: C.dim, fontSize: 11.5, marginTop: 7 }}>
+                Select the spoken language instead of Auto for best recall. English uses a dedicated English Whisper model.
               </div>
             </div>
 

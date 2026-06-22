@@ -4,8 +4,9 @@ import {
   normalizeTranscriptionError,
   offsetTimestampChunks,
   pipelineRuntimeOptions,
+  prepareAudioForRecognition,
   recoverWordTimestamps,
-} from "./transcription-core.mjs?v=5";
+} from "./transcription-core.mjs?v=6";
 
 const workerUrl = new URL(self.location.href);
 const testModule = workerUrl.searchParams.get("testTransformers");
@@ -26,15 +27,21 @@ const MODEL_IDS = {
   accurate: "Xenova/whisper-small",
 };
 
+const ENGLISH_MODEL_IDS = {
+  fast: "Xenova/whisper-tiny.en",
+  balanced: "Xenova/whisper-base.en",
+  accurate: "Xenova/whisper-small.en",
+};
+
 function send(type, payload = {}) {
   self.postMessage({ type, ...payload });
 }
 
 // Lets the editor distinguish a successfully evaluated module worker from a
 // model/network error that happens later during transcription.
-send("ready", { workerVersion: 9 });
+send("ready", { workerVersion: 10 });
 
-async function loadPipeline(model, requestedDevice, forceReload = false) {
+async function loadPipeline(model, requestedDevice, language, forceReload = false) {
   const { pipeline, env } = await import(TRANSFORMERS_CDN);
   env.allowLocalModels = false;
   env.useBrowserCache = true;
@@ -45,7 +52,9 @@ async function loadPipeline(model, requestedDevice, forceReload = false) {
     env.backends.onnx.wasm.proxy = false;
   }
 
-  const modelId = MODEL_IDS[model] || MODEL_IDS.balanced;
+  const englishOnly = language === "english" || language === "en";
+  const modelIds = englishOnly ? ENGLISH_MODEL_IDS : MODEL_IDS;
+  const modelId = modelIds[model] || modelIds.balanced;
   const device = requestedDevice === "webgpu" ? "webgpu" : "wasm";
   const key = `${modelId}:${device}`;
   if (!forceReload && transcriber && loadedKey === key) return transcriber;
@@ -93,7 +102,8 @@ async function recognizeWithTimestamps(recognizer, audio, options) {
 
 async function transcribeSpeechRegions(recognizer, audio, options) {
   const sampleRate = 16_000;
-  const regions = detectSpeechRegions(audio, sampleRate);
+  const preparedAudio = prepareAudioForRecognition(audio);
+  const regions = detectSpeechRegions(preparedAudio, sampleRate);
   send("speech-regions", {
     count: regions.length,
     duration: audio.length / sampleRate,
@@ -110,7 +120,7 @@ async function transcribeSpeechRegions(recognizer, audio, options) {
     const region = regions[index];
     const startSample = Math.max(0, Math.floor(region.start * sampleRate));
     const endSample = Math.min(audio.length, Math.ceil(region.end * sampleRate));
-    const regionAudio = audio.slice(startSample, endSample);
+    const regionAudio = preparedAudio.slice(startSample, endSample);
     send("transcription-progress", {
       text: "",
       timestamp: [region.start, region.end],
@@ -118,7 +128,13 @@ async function transcribeSpeechRegions(recognizer, audio, options) {
       regionCount: regions.length,
     });
     const result = await recognizeWithTimestamps(recognizer, regionAudio, options);
-    combined.push(...offsetTimestampChunks(result.chunks, region.start, region.end));
+    combined.push(...offsetTimestampChunks(
+      result.chunks,
+      region.start,
+      region.end,
+      region.speechStart,
+      region.speechEnd
+    ));
     if (result.text?.trim()) text.push(result.text.trim());
     if (result.word_timing_quality !== "word") timingQuality = result.word_timing_quality;
   }
@@ -141,19 +157,19 @@ self.onmessage = async (event) => {
 
   // Repeat the handshake for each job. Reused workers may have emitted their
   // module-startup message before a new per-job listener was attached.
-  send("ready", { workerVersion: 9 });
+  send("ready", { workerVersion: 10 });
 
   cancelled = false;
   let device = message.device === "webgpu" ? "webgpu" : "wasm";
   try {
     let recognizer;
     try {
-      recognizer = await loadPipeline(message.model, device, message.forceReload);
+      recognizer = await loadPipeline(message.model, device, message.language, message.forceReload);
     } catch (error) {
       if (device === "webgpu" && message.allowFallback !== false) {
         send("device-fallback", { detail: "WebGPU unavailable for this model; retrying with CPU/WASM." });
         device = "wasm";
-        recognizer = await loadPipeline(message.model, device, true);
+        recognizer = await loadPipeline(message.model, device, message.language, true);
       } else {
         throw error;
       }
@@ -168,13 +184,15 @@ self.onmessage = async (event) => {
       task: "transcribe",
       language: message.language === "auto" ? null : message.language,
       // Avoid turning sustained background sounds into caption text.
-      no_speech_threshold: 0.6,
-      logprob_threshold: -1,
+      no_speech_threshold: 0.82,
+      logprob_threshold: -1.2,
       compression_ratio_threshold: 2.4,
       condition_on_prev_tokens: false,
       do_sample: false,
       temperature: 0,
       repetition_penalty: 1.08,
+      num_beams: message.model === "accurate" ? 5 : 1,
+      early_stopping: message.model === "accurate",
       callback_function: (items) => {
         if (cancelled) return;
         const last = Array.isArray(items) ? items.at(-1) : null;
@@ -194,7 +212,7 @@ self.onmessage = async (event) => {
         detail: "WebGPU word timing failed; retrying with the CPU/WASM timestamp model.",
       });
       device = "wasm";
-      recognizer = await loadPipeline(message.model, device, true);
+      recognizer = await loadPipeline(message.model, device, message.language, true);
       result = await transcribeSpeechRegions(recognizer, message.audio, options);
     }
     if (cancelled) return send("cancelled");

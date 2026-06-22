@@ -5,6 +5,7 @@ import {
   isMissingCrossAttentionError,
   offsetTimestampChunks,
   pipelineRuntimeOptions,
+  prepareAudioForRecognition,
   recoverWordTimestamps,
 } from "../public/transcription-core.mjs";
 import { createSubtitleSegments } from "./subtitles";
@@ -17,8 +18,35 @@ describe("transcription worker helpers", () => {
     }
     const regions = detectSpeechRegions(audio);
     expect(regions).toHaveLength(1);
-    expect(regions[0].start).toBeGreaterThan(2.7);
-    expect(regions[0].end).toBeLessThan(4.3);
+    expect(regions[0].speechStart).toBeGreaterThan(2.95);
+    expect(regions[0].speechEnd).toBeLessThan(4.05);
+    expect(regions[0].start).toBeGreaterThan(2.5);
+    expect(regions[0].end).toBeLessThan(4.5);
+  });
+
+  it("retains quiet speech even when the clip contains a much louder sound", () => {
+    const audio = new Float32Array(16_000 * 7);
+    for (let index = 16_000; index < 16_000 * 2.2; index += 1) {
+      audio[index] = Math.sin(index / 7) * 0.003;
+    }
+    for (let index = 16_000 * 4; index < 16_000 * 4.1; index += 1) {
+      audio[index] = Math.sin(index / 4) * 0.5;
+    }
+    const prepared = prepareAudioForRecognition(audio);
+    const regions = detectSpeechRegions(prepared);
+    expect(regions.some((region: { speechStart: number; speechEnd: number }) =>
+      region.speechStart < 1.1 && region.speechEnd > 2
+    )).toBe(true);
+  });
+
+  it("normalizes quiet audio without clipping it", () => {
+    const audio = Float32Array.from({ length: 16_000 }, (_, index) =>
+      Math.sin(index / 10) * 0.004
+    );
+    const prepared = prepareAudioForRecognition(audio);
+    const peak = Math.max(...prepared);
+    expect(peak).toBeGreaterThan(0.02);
+    expect(peak).toBeLessThanOrEqual(1);
   });
 
   it("restores source timeline offsets after speech-only transcription", () => {
@@ -30,6 +58,14 @@ describe("transcription worker helpers", () => {
       { text: "who", timestamp: [5.1, 5.3] },
       { text: "is", timestamp: [5.3, 5.45] },
       { text: "this", timestamp: [5.45, 5.8] },
+    ]);
+  });
+
+  it("does not place a word more than 180ms before detected speech", () => {
+    expect(offsetTimestampChunks([
+      { text: "quiet", timestamp: [0, 0.3] },
+    ], 2.5, 4, 3, 3.7)).toEqual([
+      { text: "quiet", timestamp: [2.82, 3] },
     ]);
   });
 
