@@ -20,6 +20,40 @@ export function isMissingCrossAttentionError(error) {
   return /cross[\s_-]?attentions?|output_attentions/i.test(message);
 }
 
+export function hasGenuineWordTimestamps(result) {
+  const chunks = Array.isArray(result?.chunks) ? result.chunks : [];
+  if (!chunks.length) return false;
+  let previousEnd = 0;
+
+  for (const chunk of chunks) {
+    const text = String(chunk?.text || "").trim();
+    const rawStart = chunk?.timestamp?.[0];
+    const rawEnd = chunk?.timestamp?.[1];
+    if (rawStart == null || rawEnd == null) return false;
+    const start = Number(rawStart);
+    const end = Number(rawEnd);
+    if (!text || text.split(/\s+/).length !== 1) return false;
+    if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) return false;
+    if (start + 0.08 < previousEnd) return false;
+    previousEnd = end;
+  }
+  return true;
+}
+
+export function normalizeWordChunks(chunks) {
+  let previousEnd = 0;
+  return (Array.isArray(chunks) ? chunks : []).map((chunk) => {
+    const start = Math.max(previousEnd, Number(chunk.timestamp[0]));
+    const end = Math.max(start + 0.02, Number(chunk.timestamp[1]));
+    previousEnd = end;
+    return {
+      ...chunk,
+      text: String(chunk.text || "").trim(),
+      timestamp: [start, end],
+    };
+  });
+}
+
 export function pipelineRuntimeOptions(device, progressCallback) {
   if (device === "webgpu") {
     return {
@@ -34,35 +68,4 @@ export function pipelineRuntimeOptions(device, progressCallback) {
     dtype: "q8",
     progress_callback: progressCallback,
   };
-}
-
-export function expandChunksToWords(chunks) {
-  const words = [];
-
-  for (const chunk of Array.isArray(chunks) ? chunks : []) {
-    const text = String(chunk?.text || "").trim();
-    if (!text) continue;
-
-    const parts = text.split(/\s+/).filter(Boolean);
-    const start = Number(chunk?.timestamp?.[0]);
-    const end = Number(chunk?.timestamp?.[1]);
-    const hasTimestamp = Number.isFinite(start) && Number.isFinite(end) && end > start;
-    const weights = parts.map((part) => Math.max(1, part.replace(/[^\p{L}\p{N}]/gu, "").length));
-    const totalWeight = weights.reduce((sum, weight) => sum + weight, 0);
-    let elapsedWeight = 0;
-
-    for (let index = 0; index < parts.length; index += 1) {
-      const wordStart = elapsedWeight;
-      elapsedWeight += weights[index];
-      const timestamp = hasTimestamp
-        ? [
-            start + ((end - start) * wordStart) / totalWeight,
-            start + ((end - start) * elapsedWeight) / totalWeight,
-          ]
-        : null;
-      words.push({ text: parts[index], timestamp });
-    }
-  }
-
-  return words;
 }

@@ -1,8 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 
 import {
-  expandChunksToWords,
+  hasGenuineWordTimestamps,
   isMissingCrossAttentionError,
+  normalizeWordChunks,
   pipelineRuntimeOptions,
 } from "../public/transcription-core.mjs";
 
@@ -27,18 +28,30 @@ describe("transcription worker helpers", () => {
     )).toBe(true);
   });
 
-  it("converts segment timestamps to contiguous word timestamps", () => {
-    const words = expandChunksToWords([
-      { text: "A longer word.", timestamp: [2, 5] },
-    ]) as { text: string; timestamp: [number, number] }[];
-
-    expect(words.map((word) => word.text)).toEqual(["A", "longer", "word."]);
-    expect(words[0].timestamp[0]).toBe(2);
-    expect(words.at(-1)?.timestamp[1]).toBe(5);
-    expect(words[0].timestamp[1]).toBe(words[1].timestamp[0]);
-    expect(words[1].timestamp[1]).toBe(words[2].timestamp[0]);
-    expect(words[1].timestamp[1] - words[1].timestamp[0]).toBeGreaterThan(
-      words[0].timestamp[1] - words[0].timestamp[0]
-    );
+  it("accepts only genuine one-word timestamp chunks", () => {
+    expect(hasGenuineWordTimestamps({
+      chunks: [
+        { text: " Hello", timestamp: [0.2, 0.55] },
+        { text: "world.", timestamp: [0.56, 1.02] },
+      ],
+    })).toBe(true);
+    expect(hasGenuineWordTimestamps({
+      chunks: [{ text: "Hello world", timestamp: [0.2, 1.02] }],
+    })).toBe(false);
+    expect(hasGenuineWordTimestamps({
+      chunks: [{ text: "Hello", timestamp: [null, 1.02] }],
+    })).toBe(false);
   });
+
+  it("repairs tiny floating-point overlaps without estimating timings", () => {
+    const chunks = normalizeWordChunks([
+      { text: " Hello", timestamp: [0.2, 0.55] },
+      { text: " world", timestamp: [0.549, 1.02] },
+    ]) as { text: string; timestamp: [number, number] }[];
+    expect(chunks).toEqual([
+      { text: "Hello", timestamp: [0.2, 0.55] },
+      { text: "world", timestamp: [0.55, 1.02] },
+    ]);
+  });
+
 });

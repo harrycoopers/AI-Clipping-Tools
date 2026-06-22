@@ -21,7 +21,8 @@ https://harrycoopers.github.io/AI-Clipping-Tools/
 - Subtitle editing: add / delete / split / merge / duplicate, start/end times,
   search-and-replace, undo/redo, click-to-seek, active-caption highlight
 - Real local Whisper transcription through Transformers.js in a Web Worker,
-  with WebGPU-first execution, WASM fallback, word timestamps, readable cue
+  with WebGPU-first execution, WASM fallback, genuine cross-attention-derived
+  word timestamps, readable cue
   splitting, cancellation, retry, model/language controls, and cached models
 - Custom font upload (FontFace) **plus two bundled fonts**: Komika Axis and
   Montserrat ExtraBold (embedded as data URLs so they work offline and on Pages)

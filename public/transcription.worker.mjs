@@ -1,6 +1,7 @@
 import {
-  expandChunksToWords,
+  hasGenuineWordTimestamps,
   isMissingCrossAttentionError,
+  normalizeWordChunks,
   normalizeTranscriptionError,
   pipelineRuntimeOptions,
 } from "./transcription-core.mjs";
@@ -13,9 +14,11 @@ let transcriber = null;
 let loadedKey = "";
 
 const MODEL_IDS = {
-  fast: "onnx-community/whisper-tiny",
-  balanced: "onnx-community/whisper-base",
-  accurate: "onnx-community/whisper-small",
+  // These Transformers.js exports include the decoder cross-attention outputs
+  // required by Whisper's DTW-based token/word timestamp extraction.
+  fast: "Xenova/whisper-tiny",
+  balanced: "Xenova/whisper-base",
+  accurate: "Xenova/whisper-small",
 };
 
 function send(type, payload = {}) {
@@ -60,28 +63,20 @@ async function loadPipeline(model, requestedDevice, forceReload = false) {
 
 async function recognizeWithTimestamps(recognizer, audio, options) {
   try {
-    return await recognizer(audio, options);
-  } catch (error) {
-    if (!isMissingCrossAttentionError(error)) throw error;
-
-    // Some optimized decoder exports do not expose cross-attention tensors.
-    // Segment timestamps use Whisper's timestamp tokens instead, so retain
-    // usable timing data and distribute each segment across its words.
-    send("stage", {
-      stage: "transcription",
-      status: "active",
-      detail: "Word timing unavailable; using segment timing",
-    });
-    const segmentOptions = { ...options };
-    delete segmentOptions.output_attentions;
-    const result = await recognizer(audio, {
-      ...segmentOptions,
-      return_timestamps: true,
-    });
+    const result = await recognizer(audio, options);
+    if (!hasGenuineWordTimestamps(result)) {
+      throw new Error("The transcription model did not return genuine word-level timestamps.");
+    }
     return {
       ...result,
-      chunks: expandChunksToWords(result?.chunks),
+      chunks: normalizeWordChunks(result.chunks),
+      word_timestamps: true,
     };
+  } catch (error) {
+    if (isMissingCrossAttentionError(error)) {
+      throw new Error("This cached Whisper model cannot produce word timestamps. Retry to download the timestamp-compatible model.");
+    }
+    throw error;
   }
 }
 
@@ -114,10 +109,6 @@ self.onmessage = async (event) => {
     send("stage", { stage: "transcription", status: "active", detail: "Recognising speech" });
     const options = {
       return_timestamps: "word",
-      // Whisper derives word boundaries from decoder cross-attention. Request
-      // those outputs explicitly; otherwise generate() can omit them even when
-      // the selected ONNX model supports word timestamps.
-      output_attentions: true,
       chunk_length_s: message.model === "accurate" ? 20 : 30,
       stride_length_s: 5,
       task: "transcribe",
@@ -143,7 +134,7 @@ self.onmessage = async (event) => {
       if (device !== "webgpu" || message.allowFallback === false) throw error;
 
       send("device-fallback", {
-        detail: "WebGPU inference failed; retrying transcription with CPU/WASM.",
+        detail: "WebGPU word timing failed; retrying with the CPU/WASM timestamp model.",
       });
       device = "wasm";
       recognizer = await loadPipeline(message.model, device, true);
@@ -155,6 +146,7 @@ self.onmessage = async (event) => {
       text: result?.text || "",
       chunks: Array.isArray(result?.chunks) ? result.chunks : [],
       device,
+      wordTimestamps: result?.word_timestamps === true,
     });
   } catch (error) {
     if (!cancelled) {
