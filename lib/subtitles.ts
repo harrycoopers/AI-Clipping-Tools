@@ -272,5 +272,34 @@ export function createSubtitleSegments(
   }
   flush();
 
-  return out.filter((segment) => segment.end > segment.start && segment.text.length > 0);
+  const valid = out.filter((segment) => segment.end > segment.start && segment.text.length > 0);
+  const filtered: typeof valid = [];
+  let repeatedKey = "";
+  let repeatedCount = 0;
+  let previousCandidate: (typeof valid)[number] | undefined;
+
+  for (const segment of valid) {
+    const key = segment.text
+      .toLocaleLowerCase()
+      .replace(/[^\p{L}\p{N}']+/gu, " ")
+      .trim();
+    const closeToPrevious = previousCandidate
+      ? segment.start - previousCandidate.end <= Math.max(2, previousCandidate.end - previousCandidate.start)
+      : false;
+
+    if (key && key === repeatedKey && closeToPrevious) {
+      repeatedCount += 1;
+    } else {
+      repeatedKey = key;
+      repeatedCount = 1;
+    }
+    previousCandidate = segment;
+
+    // Whisper can enter a decoder loop and emit the same short phrase many
+    // times. Keep one genuine repeat, but reject the third adjacent duplicate.
+    if (repeatedCount > 2 && key.split(/\s+/).length <= 10) continue;
+    filtered.push(segment);
+  }
+
+  return filtered;
 }

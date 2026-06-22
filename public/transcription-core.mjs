@@ -20,6 +20,90 @@ export function isMissingCrossAttentionError(error) {
   return /cross[\s_-]?attentions?|output_attentions/i.test(message);
 }
 
+export function detectSpeechRegions(audio, sampleRate = 16_000) {
+  if (!(audio instanceof Float32Array) || !audio.length) return [];
+
+  const frameSize = Math.max(1, Math.round(sampleRate * 0.03));
+  const frameCount = Math.ceil(audio.length / frameSize);
+  const levels = new Float32Array(frameCount);
+  let peak = 0;
+
+  for (let frame = 0; frame < frameCount; frame += 1) {
+    const start = frame * frameSize;
+    const end = Math.min(audio.length, start + frameSize);
+    let sumSquares = 0;
+    for (let index = start; index < end; index += 1) {
+      sumSquares += audio[index] * audio[index];
+    }
+    const rms = Math.sqrt(sumSquares / Math.max(1, end - start));
+    levels[frame] = rms;
+    peak = Math.max(peak, rms);
+  }
+
+  if (peak < 0.001) return [];
+  const sorted = Array.from(levels).sort((a, b) => a - b);
+  const noiseFloor = sorted[Math.floor(sorted.length * 0.2)] || 0;
+  const threshold = Math.max(0.0015, noiseFloor * 3, peak * 0.035);
+  const active = Array.from(levels, (level) => level >= threshold);
+
+  // Bridge very short dips inside speech and retain a small amount of context.
+  const bridgeFrames = Math.round(0.18 / 0.03);
+  let lastActive = -1;
+  for (let frame = 0; frame < active.length; frame += 1) {
+    if (!active[frame]) continue;
+    if (lastActive >= 0 && frame - lastActive - 1 <= bridgeFrames) {
+      for (let fill = lastActive + 1; fill < frame; fill += 1) active[fill] = true;
+    }
+    lastActive = frame;
+  }
+
+  const regions = [];
+  const padFrames = Math.round(0.22 / 0.03);
+  let startFrame = null;
+  for (let frame = 0; frame <= active.length; frame += 1) {
+    if (frame < active.length && active[frame] && startFrame == null) startFrame = frame;
+    if ((frame === active.length || !active[frame]) && startFrame != null) {
+      const endFrame = frame;
+      const speechDuration = (endFrame - startFrame) * 0.03;
+      if (speechDuration >= 0.12) {
+        regions.push({
+          start: Math.max(0, (startFrame - padFrames) * frameSize / sampleRate),
+          end: Math.min(audio.length / sampleRate, (endFrame + padFrames) * frameSize / sampleRate),
+        });
+      }
+      startFrame = null;
+    }
+  }
+
+  // Fewer, larger regions are faster and give Whisper enough linguistic
+  // context, while still excluding the long silences that cause hallucination.
+  const merged = [];
+  for (const region of regions) {
+    const previous = merged.at(-1);
+    if (previous && region.start - previous.end <= 0.65) {
+      previous.end = region.end;
+    } else {
+      merged.push({ ...region });
+    }
+  }
+  return merged;
+}
+
+export function offsetTimestampChunks(chunks, offset, regionEnd = Infinity) {
+  if (!Array.isArray(chunks)) return [];
+  return chunks.map((chunk) => {
+    const start = chunk?.timestamp?.[0];
+    const end = chunk?.timestamp?.[1];
+    return {
+      ...chunk,
+      timestamp: [
+        Number.isFinite(start) ? Math.min(regionEnd, Math.max(offset, start + offset)) : null,
+        Number.isFinite(end) ? Math.min(regionEnd, Math.max(offset, end + offset)) : null,
+      ],
+    };
+  });
+}
+
 export function recoverWordTimestamps(result, audioDuration) {
   const chunks = Array.isArray(result?.chunks) ? result.chunks : [];
   if (!chunks.length) return { chunks: [], quality: "none", rawTimedRatio: 0 };

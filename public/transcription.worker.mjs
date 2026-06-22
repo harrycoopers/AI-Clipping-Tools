@@ -1,9 +1,11 @@
 import {
+  detectSpeechRegions,
   isMissingCrossAttentionError,
   normalizeTranscriptionError,
+  offsetTimestampChunks,
   pipelineRuntimeOptions,
   recoverWordTimestamps,
-} from "./transcription-core.mjs?v=4";
+} from "./transcription-core.mjs?v=5";
 
 const workerUrl = new URL(self.location.href);
 const testModule = workerUrl.searchParams.get("testTransformers");
@@ -30,7 +32,7 @@ function send(type, payload = {}) {
 
 // Lets the editor distinguish a successfully evaluated module worker from a
 // model/network error that happens later during transcription.
-send("ready", { workerVersion: 8 });
+send("ready", { workerVersion: 9 });
 
 async function loadPipeline(model, requestedDevice, forceReload = false) {
   const { pipeline, env } = await import(TRANSFORMERS_CDN);
@@ -89,6 +91,45 @@ async function recognizeWithTimestamps(recognizer, audio, options) {
   }
 }
 
+async function transcribeSpeechRegions(recognizer, audio, options) {
+  const sampleRate = 16_000;
+  const regions = detectSpeechRegions(audio, sampleRate);
+  send("speech-regions", {
+    count: regions.length,
+    duration: audio.length / sampleRate,
+  });
+  if (!regions.length) {
+    return { text: "", chunks: [], word_timestamps: true, word_timing_quality: "word" };
+  }
+
+  const combined = [];
+  const text = [];
+  let timingQuality = "word";
+  for (let index = 0; index < regions.length; index += 1) {
+    if (cancelled) break;
+    const region = regions[index];
+    const startSample = Math.max(0, Math.floor(region.start * sampleRate));
+    const endSample = Math.min(audio.length, Math.ceil(region.end * sampleRate));
+    const regionAudio = audio.slice(startSample, endSample);
+    send("transcription-progress", {
+      text: "",
+      timestamp: [region.start, region.end],
+      region: index + 1,
+      regionCount: regions.length,
+    });
+    const result = await recognizeWithTimestamps(recognizer, regionAudio, options);
+    combined.push(...offsetTimestampChunks(result.chunks, region.start, region.end));
+    if (result.text?.trim()) text.push(result.text.trim());
+    if (result.word_timing_quality !== "word") timingQuality = result.word_timing_quality;
+  }
+  return {
+    text: text.join(" ").trim(),
+    chunks: combined,
+    word_timestamps: true,
+    word_timing_quality: timingQuality,
+  };
+}
+
 self.onmessage = async (event) => {
   const message = event.data;
   if (message?.type === "cancel") {
@@ -100,7 +141,7 @@ self.onmessage = async (event) => {
 
   // Repeat the handshake for each job. Reused workers may have emitted their
   // module-startup message before a new per-job listener was attached.
-  send("ready", { workerVersion: 8 });
+  send("ready", { workerVersion: 9 });
 
   cancelled = false;
   let device = message.device === "webgpu" ? "webgpu" : "wasm";
@@ -131,6 +172,9 @@ self.onmessage = async (event) => {
       logprob_threshold: -1,
       compression_ratio_threshold: 2.4,
       condition_on_prev_tokens: false,
+      do_sample: false,
+      temperature: 0,
+      repetition_penalty: 1.08,
       callback_function: (items) => {
         if (cancelled) return;
         const last = Array.isArray(items) ? items.at(-1) : null;
@@ -142,7 +186,7 @@ self.onmessage = async (event) => {
     };
     let result;
     try {
-      result = await recognizeWithTimestamps(recognizer, message.audio, options);
+      result = await transcribeSpeechRegions(recognizer, message.audio, options);
     } catch (error) {
       if (device !== "webgpu" || message.allowFallback === false) throw error;
 
@@ -151,7 +195,7 @@ self.onmessage = async (event) => {
       });
       device = "wasm";
       recognizer = await loadPipeline(message.model, device, true);
-      result = await recognizeWithTimestamps(recognizer, message.audio, options);
+      result = await transcribeSpeechRegions(recognizer, message.audio, options);
     }
     if (cancelled) return send("cancelled");
     send("stage", { stage: "transcription", status: "complete", detail: "Speech recognised" });

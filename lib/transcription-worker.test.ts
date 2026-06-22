@@ -15,8 +15,17 @@ describe("transcription worker word timing configuration", () => {
   it("requires genuine word timestamps and never estimates them from segments", () => {
     expect(worker).toContain('return_timestamps: "word"');
     expect(worker).toContain("recoverWordTimestamps");
+    expect(worker).toContain("detectSpeechRegions");
+    expect(worker).toContain("offsetTimestampChunks");
     expect(worker).not.toContain("using segment timing");
     expect(worker).not.toContain("expandChunksToWords");
+  });
+
+  it("uses deterministic decoding with repetition protection", () => {
+    expect(worker).toContain("do_sample: false");
+    expect(worker).toContain("temperature: 0");
+    expect(worker).toContain("repetition_penalty: 1.08");
+    expect(worker).toContain("condition_on_prev_tokens: false");
   });
 
   it("cache-busts the helper module and announces successful startup", () => {

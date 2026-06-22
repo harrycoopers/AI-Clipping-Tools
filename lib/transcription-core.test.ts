@@ -1,13 +1,38 @@
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  detectSpeechRegions,
   isMissingCrossAttentionError,
+  offsetTimestampChunks,
   pipelineRuntimeOptions,
   recoverWordTimestamps,
 } from "../public/transcription-core.mjs";
 import { createSubtitleSegments } from "./subtitles";
 
 describe("transcription worker helpers", () => {
+  it("finds speech and excludes long digital silence", () => {
+    const audio = new Float32Array(16_000 * 8);
+    for (let index = 16_000 * 3; index < 16_000 * 4; index += 1) {
+      audio[index] = Math.sin(index / 8) * 0.12;
+    }
+    const regions = detectSpeechRegions(audio);
+    expect(regions).toHaveLength(1);
+    expect(regions[0].start).toBeGreaterThan(2.7);
+    expect(regions[0].end).toBeLessThan(4.3);
+  });
+
+  it("restores source timeline offsets after speech-only transcription", () => {
+    expect(offsetTimestampChunks([
+      { text: "who", timestamp: [0.1, 0.3] },
+      { text: "is", timestamp: [0.3, 0.45] },
+      { text: "this", timestamp: [0.45, 0.8] },
+    ], 5, 6)).toEqual([
+      { text: "who", timestamp: [5.1, 5.3] },
+      { text: "is", timestamp: [5.3, 5.45] },
+      { text: "this", timestamp: [5.45, 5.8] },
+    ]);
+  });
+
   it("forces the WASM backend instead of allowing WebGPU auto-selection", () => {
     expect(pipelineRuntimeOptions("wasm", vi.fn())).toMatchObject({
       device: "wasm",

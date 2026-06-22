@@ -213,4 +213,13 @@ describe("createSubtitleSegments", () => {
     expect(result).toHaveLength(1);
     expect(result[0].end).toBeGreaterThan(result[0].start);
   });
+
+  it("stops pathological adjacent phrase repetition but keeps one real repeat", () => {
+    const chunks = Array.from({ length: 20 }, (_, index) => ({
+      text: "I got a cut.",
+      timestamp: [index, index + 0.8] as [number, number],
+    }));
+    const result = createSubtitleSegments(chunks, { maxWords: 4, maxDuration: 1 });
+    expect(result.map((cue) => cue.text)).toEqual(["I got a cut.", "I got a cut."]);
+  });
 });
