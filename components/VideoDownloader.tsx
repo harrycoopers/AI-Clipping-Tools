@@ -2,7 +2,11 @@
 
 import { useState } from "react";
 import { Download, Link, LoaderCircle } from "lucide-react";
-import { detectDownloadPlatform, downloaderServiceUrl } from "@/lib/downloader";
+import {
+  detectDownloadPlatform,
+  downloaderConnectionError,
+  downloaderServiceUrl,
+} from "@/lib/downloader";
 
 export default function VideoDownloader() {
   const [url, setUrl] = useState("");
@@ -16,7 +20,27 @@ export default function VideoDownloader() {
     setError("");
 
     try {
-      const response = await fetch(`${downloaderServiceUrl()}/api/download`, {
+      const serviceUrl = downloaderServiceUrl();
+      if (!serviceUrl) throw new Error(downloaderConnectionError(serviceUrl));
+
+      let health: Response;
+      try {
+        health = await fetch(`${serviceUrl}/health`, {
+          signal: AbortSignal.timeout(5_000),
+        });
+      } catch {
+        throw new Error(downloaderConnectionError(serviceUrl));
+      }
+      const status = await health.json().catch(() => null);
+      if (!health.ok) throw new Error(status?.error || "The downloader service health check failed.");
+      if (!status?.ytDlp?.available) {
+        throw new Error("The downloader service is running, but yt-dlp is not installed. Run \"npm run downloader:setup\", then restart the service.");
+      }
+      if (!status?.ffmpeg?.available) {
+        throw new Error("The downloader service is running, but FFmpeg is not configured. Install FFmpeg or set FFMPEG_PATH.");
+      }
+
+      const response = await fetch(`${serviceUrl}/api/download`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ url: url.trim(), maxHeight: 1080, maxFps: 60 }),
@@ -41,7 +65,8 @@ export default function VideoDownloader() {
       anchor.remove();
       setTimeout(() => URL.revokeObjectURL(objectUrl), 60_000);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "The video could not be downloaded.");
+      const message = cause instanceof Error ? cause.message : "The video could not be downloaded.";
+      setError(message === "Failed to fetch" ? downloaderConnectionError(downloaderServiceUrl()) : message);
     } finally {
       setDownloading(false);
     }

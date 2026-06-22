@@ -63,10 +63,15 @@ No environment variables or API keys are needed for the subtitle editor.
 Install `yt-dlp` and FFmpeg so both commands are on your `PATH`, then run:
 
 ```bash
+npm run downloader:setup
 npm run downloader:server
 ```
 
-The app connects to `http://127.0.0.1:4317` by default. For a deployed frontend,
+On Windows, `downloader:setup` installs current official nightly builds into
+the project's ignored `tools/` directory. `npm run dev` now starts both the web
+app and downloader service; use `npm run dev:web` to start only Next.js.
+
+The local app connects to port `4317` by default. For a deployed frontend,
 host the service separately over HTTPS and set `NEXT_PUBLIC_DOWNLOADER_API_URL`
 before building. Download only content you own or have permission to use.
 

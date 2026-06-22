@@ -3,9 +3,11 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev",
+    "dev": "node scripts/dev.mjs",
+    "dev:web": "next dev",
     "build": "next build",
     "start": "npx serve out",
+    "downloader:setup": "node scripts/setup-downloader.mjs",
     "downloader:server": "node server/downloader-server.mjs",
     "lint": "eslint",
     "test": "vitest run",

@@ -21,5 +21,15 @@ export function detectDownloadPlatform(value: string): DownloadPlatform | null {
 export function downloaderServiceUrl(): string {
   const configured = process.env.NEXT_PUBLIC_DOWNLOADER_API_URL?.trim();
   if (configured) return configured.replace(/\/+$/, "");
-  return "http://127.0.0.1:4317";
+  if (typeof window !== "undefined" && window.location.protocol === "http:") {
+    return `http://${window.location.hostname}:4317`;
+  }
+  return "";
+}
+
+export function downloaderConnectionError(serviceUrl: string): string {
+  if (!serviceUrl) {
+    return "The deployed site needs an HTTPS downloader backend. Configure NEXT_PUBLIC_DOWNLOADER_API_URL before building.";
+  }
+  return `The downloader service at ${serviceUrl} is not reachable. Start it with "npm run downloader:server" and try again.`;
 }

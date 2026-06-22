@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { detectDownloadPlatform } from "./downloader";
+import { detectDownloadPlatform, downloaderConnectionError } from "./downloader";
 
 describe("detectDownloadPlatform", () => {
   it("accepts supported video platforms", () => {
@@ -16,5 +16,10 @@ describe("detectDownloadPlatform", () => {
     expect(detectDownloadPlatform("not a link")).toBeNull();
     expect(detectDownloadPlatform("https://example.com/video")).toBeNull();
     expect(detectDownloadPlatform("file:///video.mp4")).toBeNull();
+  });
+
+  it("provides actionable backend connection errors", () => {
+    expect(downloaderConnectionError("")).toContain("HTTPS downloader backend");
+    expect(downloaderConnectionError("http://localhost:4317")).toContain("npm run downloader:server");
   });
 });
