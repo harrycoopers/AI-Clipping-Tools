@@ -28,6 +28,10 @@ https://harrycoopers.github.io/AI-Clipping-Tools/
 - **In-browser MP4 export** — captions are burned in with Canvas and encoded
   with WebCodecs into a fast-start, seek-validated MP4 that downloads locally.
 - SRT/VTT import, SRT + project-JSON export
+- Browser-local Portrait Gaming Layout with multi-frame webcam/gameplay
+  detection, confidence review, manual source/destination correction, split
+  and floating layouts, reusable layout presets, safe-area guides and true
+  9:16 MP4 composition
 - Auto-Subtitles opens directly, with an Auto Clips tool for Twitch/Kick VOD
   highlight detection and one-click subtitle handoff
 - Clip Downloader is available again for supported video links

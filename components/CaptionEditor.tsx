@@ -14,6 +14,9 @@ import {
   type SubtitleWord,
 } from "@/lib/subtitles";
 import { asset } from "@/lib/basePath";
+import PortraitLayoutPanel from "./PortraitLayoutPanel";
+import { createDefaultPortraitLayout, type PortraitGamingLayout } from "@/lib/portrait-layout";
+import { drawPortraitFrame } from "@/lib/portrait-renderer";
 
 /* ---------------------------------------------------------------------------
    CaptionForge — auto-subtitle preset system + working caption editor core.
@@ -398,6 +401,8 @@ export default function CaptionEditor({ onHome, incomingVideo, autoTranscribeTok
   const [currentTime, setCurrentTime] = useState(0);
   const [locked, setLocked] = useState(false);
   const [showSafe, setShowSafe] = useState(true);
+  const [previewSize, setPreviewSize] = useState<"small" | "medium" | "large" | "fit">("fit");
+  const [theatreMode, setTheatreMode] = useState(false);
   const [autoOpen, setAutoOpen] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
   const [renameId, setRenameId] = useState<string | null>(null);
@@ -409,6 +414,8 @@ export default function CaptionEditor({ onHome, incomingVideo, autoTranscribeTok
   const [preferWebGpu, setPreferWebGpu] = useState(true);
   const [lastTranscriptionFailed, setLastTranscriptionFailed] = useState(false);
   const [customFonts, setCustomFonts] = useState<CustomFont[]>([]);
+  const [portraitLayout, setPortraitLayout] = useState<PortraitGamingLayout>(() => createDefaultPortraitLayout());
+  const [selectedPortraitRegionId, setSelectedPortraitRegionId] = useState<string | null>("webcam");
   const [transcription, setTranscription] = useState<TranscriptionState>({
     stage: null,
     stages: {
@@ -433,8 +440,17 @@ export default function CaptionEditor({ onHome, incomingVideo, autoTranscribeTok
   }, []);
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  const portraitCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const previewRef = useRef<HTMLDivElement | null>(null);
   const dragRef = useRef<{ id: string; rect: DOMRect } | null>(null);
+  const portraitDragRef = useRef<{
+    id: string;
+    mode: "move" | "resize" | "split";
+    startX: number;
+    startY: number;
+    original: { x: number; y: number; width: number; height: number };
+    bounds: DOMRect;
+  } | null>(null);
   const [previewH, setPreviewH] = useState(360);
   const transcriptionWorkerRef = useRef<Worker | null>(null);
   const transcriptionRejectRef = useRef<((reason?: unknown) => void) | null>(null);
@@ -465,6 +481,9 @@ export default function CaptionEditor({ onHome, incomingVideo, autoTranscribeTok
           setTranscriptionModel(project.transcriptionModel);
         }
         if (typeof project.preferWebGpu === "boolean") setPreferWebGpu(project.preferWebGpu);
+        if (project.portraitLayout?.regions) {
+          setPortraitLayout({ ...createDefaultPortraitLayout(), ...project.portraitLayout });
+        }
         if (Array.isArray(project.customFonts)) {
           const restored: CustomFont[] = [];
           for (const item of project.customFonts) {
@@ -496,6 +515,7 @@ export default function CaptionEditor({ onHome, incomingVideo, autoTranscribeTok
         language,
         transcriptionModel,
         preferWebGpu,
+        portraitLayout,
         customFonts: customFonts.filter((font) => font.dataUrl).map(({ name, dataUrl }) => ({ name, dataUrl })),
       }));
     } catch {
@@ -503,7 +523,7 @@ export default function CaptionEditor({ onHome, incomingVideo, autoTranscribeTok
     }
   }, [
     presets, defaultId, autoChoiceId, activePresetId, applyDefaultToNew,
-    segments, language, transcriptionModel, preferWebGpu, customFonts,
+    segments, language, transcriptionModel, preferWebGpu, customFonts, portraitLayout,
   ]);
 
   useEffect(() => () => transcriptionWorkerRef.current?.terminate(), []);
@@ -583,6 +603,19 @@ export default function CaptionEditor({ onHome, incomingVideo, autoTranscribeTok
     ro(); window.addEventListener("resize", ro);
     return () => window.removeEventListener("resize", ro);
   }, [video]);
+
+  useEffect(() => {
+    if (!portraitLayout.enabled || !videoRef.current || !portraitCanvasRef.current) return;
+    const canvas = portraitCanvasRef.current;
+    const source = videoRef.current;
+    const previewWidth = Math.max(360, Math.round((portraitLayout.outputWidth / portraitLayout.outputHeight) * 960));
+    canvas.width = previewWidth;
+    canvas.height = 960;
+    const ctx = canvas.getContext("2d");
+    if (ctx && source.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
+      drawPortraitFrame(ctx, source, portraitLayout, canvas.width, canvas.height, currentTime);
+    }
+  }, [portraitLayout, currentTime, video]);
 
   // ---- segment ops ----
   const commit = (next: Segment[]) => { pushHistory(segments); setSegments(next); };
@@ -970,10 +1003,21 @@ export default function CaptionEditor({ onHome, incomingVideo, autoTranscribeTok
   }
   function exportProject() {
     download("project.cfproj.json", JSON.stringify({
-      kind: "captionforge-project", presets, defaultId, applyDefaultToNew,
+      kind: "captionforge-project", presets, defaultId, applyDefaultToNew, portraitLayout,
       // eslint-disable-next-line @typescript-eslint/no-unused-vars
       segments: segments.map(({ id: _id, ...r }) => r), video: video ? { name: video.name, duration: video.duration } : null,
     }, null, 2), "application/json");
+  }
+  function importProject(file: File) {
+    file.text().then((text) => {
+      const project = JSON.parse(text);
+      if (project.kind !== "captionforge-project") throw new Error("Invalid project");
+      if (Array.isArray(project.presets) && project.presets.length) setPresets(project.presets);
+      if (typeof project.defaultId === "string") setDefaultId(project.defaultId);
+      if (Array.isArray(project.segments)) setSegments(project.segments.map((segment: Segment) => ({ ...segment, id: segment.id || uid() })));
+      if (project.portraitLayout?.regions) setPortraitLayout({ ...createDefaultPortraitLayout(), ...project.portraitLayout });
+      flash("Project imported");
+    }).catch(() => flash("That file is not a valid CaptionForge project"));
   }
 
   const [rendering, setRendering] = useState(false);
@@ -1096,7 +1140,8 @@ export default function CaptionEditor({ onHome, incomingVideo, autoTranscribeTok
   /* eslint-disable @typescript-eslint/no-explicit-any */
   // Paint one frame (video + active caption) onto the export canvas.
   function paintFrame(ctx: CanvasRenderingContext2D, src: HTMLVideoElement, W: number, H: number, t: number) {
-    ctx.drawImage(src, 0, 0, W, H);
+    if (portraitLayout.enabled) drawPortraitFrame(ctx, src, portraitLayout, W, H, t);
+    else ctx.drawImage(src, 0, 0, W, H);
     const active = segments.find((s) => t >= s.start && t < s.end);
     if (active) drawCaptionToCanvas(ctx, W, H, active, styleFor(active), t);
   }
@@ -1143,6 +1188,10 @@ export default function CaptionEditor({ onHome, incomingVideo, autoTranscribeTok
 
   async function renderVideo() {
     if (!video) return;
+    if (portraitLayout.enabled && portraitLayout.detection?.confidenceLevel === "low" && !portraitLayout.detection.confirmed) {
+      setRenderError("Confirm the low-confidence webcam detection or adjust the regions before export.");
+      return;
+    }
     setRendering(true);
     setRenderError(null);
     setRenderProgress(1);
@@ -1184,7 +1233,8 @@ export default function CaptionEditor({ onHome, incomingVideo, autoTranscribeTok
       const maxH = video.w >= video.h ? 1080 : 1920;
       const scale = Math.min(maxW / video.w, maxH / video.h);
       const even = (n: number) => Math.max(2, Math.round((n * scale) / 2) * 2);
-      const W = even(video.w), H = even(video.h);
+      const W = portraitLayout.enabled ? portraitLayout.outputWidth : even(video.w);
+      const H = portraitLayout.enabled ? portraitLayout.outputHeight : even(video.h);
       canvas.width = W; canvas.height = H;
       const ctx = canvas.getContext("2d", { willReadFrequently: true }) as CanvasRenderingContext2D | null;
       if (!ctx) throw new Error("Canvas 2D context unavailable in this browser");
@@ -1444,6 +1494,74 @@ export default function CaptionEditor({ onHome, incomingVideo, autoTranscribeTok
     window.addEventListener("pointermove", onPreviewPointerMove);
     window.addEventListener("pointerup", onPreviewPointerUp);
   }
+
+  function startPortraitDrag(event: React.PointerEvent, id: string, mode: "move" | "resize" | "split") {
+    event.stopPropagation();
+    const bounds = previewRef.current?.getBoundingClientRect();
+    const region = portraitLayout.regions.find((item) => item.id === id);
+    if (!bounds || (!region && mode !== "split") || region?.locked) return;
+    setSelectedPortraitRegionId(id);
+    portraitDragRef.current = {
+      id, mode, startX: event.clientX, startY: event.clientY,
+      original: region?.destination || { x: 0, y: portraitLayout.splitRatio, width: 1, height: 0 },
+      bounds,
+    };
+    window.addEventListener("pointermove", onPortraitPointerMove);
+    window.addEventListener("pointerup", stopPortraitDrag);
+  }
+
+  function onPortraitPointerMove(event: PointerEvent) {
+    const drag = portraitDragRef.current;
+    if (!drag) return;
+    const dx = (event.clientX - drag.startX) / drag.bounds.width;
+    const dy = (event.clientY - drag.startY) / drag.bounds.height;
+    if (drag.mode === "split") {
+      const dividerPosition = (event.clientY - drag.bounds.top) / drag.bounds.height;
+      setPortraitLayout((current) => {
+        const splitRatio = clamp(current.webcamPosition === "top" ? 1 - dividerPosition : dividerPosition, 0.5, 0.85);
+        const next = { ...current, splitRatio };
+        const gameplay = next.regions.find((region) => region.type === "gameplay");
+        const webcam = next.regions.find((region) => region.type === "webcam");
+        if (!gameplay || !webcam) return next;
+        const webcamTop = next.webcamPosition === "top";
+        return {
+          ...next,
+          regions: next.regions.map((region) => region.id === gameplay.id
+            ? { ...region, destination: webcamTop ? { x: 0, y: 1 - splitRatio, width: 1, height: splitRatio } : { x: 0, y: 0, width: 1, height: splitRatio } }
+            : region.id === webcam.id
+              ? { ...region, destination: webcamTop ? { x: 0, y: 0, width: 1, height: 1 - splitRatio } : { x: 0, y: splitRatio, width: 1, height: 1 - splitRatio } }
+              : region),
+        };
+      });
+      return;
+    }
+    setPortraitLayout((current) => ({
+      ...current,
+      layout: "manual",
+      regions: current.regions.map((region) => {
+        if (region.id !== drag.id) return region;
+        const snap = (value: number) => {
+          if (!current.snapping) return value;
+          for (const target of [0, .5, 1]) if (Math.abs(value - target) < .018) return target;
+          return value;
+        };
+        if (drag.mode === "move") {
+          const x = snap(clamp(drag.original.x + dx, 0, 1 - drag.original.width));
+          const y = snap(clamp(drag.original.y + dy, 0, 1 - drag.original.height));
+          return { ...region, destination: { ...drag.original, x, y } };
+        }
+        const width = clamp(drag.original.width + dx, .04, 1 - drag.original.x);
+        const height = clamp(drag.original.height + dy, .04, 1 - drag.original.y);
+        return { ...region, destination: { ...drag.original, width: snap(width), height: snap(height) } };
+      }),
+    }));
+  }
+
+  function stopPortraitDrag() {
+    portraitDragRef.current = null;
+    window.removeEventListener("pointermove", onPortraitPointerMove);
+    window.removeEventListener("pointerup", stopPortraitDrag);
+  }
   function onPreviewPointerMove(e: PointerEvent) {
     const d = dragRef.current; if (!d) return;
     const x = clamp(((e.clientX - d.rect.left) / d.rect.width) * 100, 0, 100);
@@ -1531,19 +1649,20 @@ export default function CaptionEditor({ onHome, incomingVideo, autoTranscribeTok
           </div>
 
           <Btn kind="ghost" onClick={exportProject} title="Export the project (presets + captions) as JSON"><Download size={14} /> Save project</Btn>
+          <label><Btn kind="ghost" title="Import a CaptionForge project"><FileUp size={14} /> Open project</Btn><input type="file" accept=".json,.cfproj.json" hidden onChange={(event) => { const file = event.target.files?.[0]; if (file) importProject(file); }} /></label>
           {rendering ? (
             <Btn kind="danger" onClick={cancelRender} title={renderStatus || "Rendering"}><X size={14} /> Cancel ({renderProgress}%)</Btn>
           ) : (
-            <Btn kind="solid" onClick={renderVideo} disabled={!video || segments.length === 0} title="Burn captions into the video in your browser and download an MP4 (falls back to WebM on browsers without WebCodecs)">
+            <Btn kind="solid" onClick={renderVideo} disabled={!video} title="Render the current video layout and captions into a seekable MP4">
               <Film size={14} /> Render &amp; Download
             </Btn>
           )}
         </header>
 
         {/* ============ body ============ */}
-        <div className="cf-body">
+        <div className="cf-body" style={theatreMode ? { gridTemplateColumns: "1fr" } : undefined}>
           {/* ---------- LEFT: captions + fonts ---------- */}
-          <aside className="cf-left" style={{ background: C.bg2, borderRight: `1px solid ${C.line}` }}>
+          <aside className="cf-left" style={{ background: C.bg2, borderRight: `1px solid ${C.line}`, display: theatreMode ? "none" : undefined }}>
             <div style={{ padding: "14px 16px", borderBottom: `1px solid ${C.line}`, display: "flex", alignItems: "center", gap: 8 }}>
               <Layers size={15} color={C.amber} />
               <span style={{ fontWeight: 700, fontSize: 13, flex: 1 }}>Captions</span>
@@ -1650,13 +1769,50 @@ export default function CaptionEditor({ onHome, incomingVideo, autoTranscribeTok
                 <Dropzone onFile={loadVideo} />
               ) : (
                 <div ref={previewRef} onPointerDown={onPreviewPointerDown}
-                  style={{ position: "relative", maxWidth: "100%", maxHeight: "100%", borderRadius: 14, overflow: "hidden", boxShadow: "0 24px 70px rgba(0,0,0,.6)", aspectRatio: `${video.w}/${video.h}`, background: "#000" }}>
-                  <video ref={videoRef} src={video.url} style={{ display: "block", width: "100%", height: "100%", objectFit: "contain" }}
+                  style={{ position: "relative", width: previewSize === "small" ? "34%" : previewSize === "medium" ? "50%" : previewSize === "large" ? "72%" : undefined, maxWidth: "100%", maxHeight: "100%", borderRadius: 14, overflow: "hidden", boxShadow: "0 24px 70px rgba(0,0,0,.6)", aspectRatio: portraitLayout.enabled ? `${portraitLayout.outputWidth}/${portraitLayout.outputHeight}` : `${video.w}/${video.h}`, background: "#000" }}>
+                  <video ref={videoRef} src={video.url} style={{ display: "block", width: "100%", height: "100%", objectFit: "contain", opacity: portraitLayout.enabled ? 0 : 1 }}
                     onClick={() => setPlaying((p) => !p)} onLoadedMetadata={(e) => setPreviewH((e.target as HTMLVideoElement).clientHeight)} />
+                  {portraitLayout.enabled && <canvas ref={portraitCanvasRef} onClick={() => setPlaying((p) => !p)} style={{ position: "absolute", inset: 0, width: "100%", height: "100%" }} />}
+                  {portraitLayout.enabled && portraitLayout.regions.filter((region) => region.visible).map((region) => {
+                    const selected = selectedPortraitRegionId === region.id;
+                    return (
+                      <div key={region.id}
+                        onPointerDown={(event) => startPortraitDrag(event, region.id, "move")}
+                        onClick={(event) => { event.stopPropagation(); setSelectedPortraitRegionId(region.id); }}
+                        style={{
+                          position: "absolute",
+                          left: `${region.destination.x * 100}%`,
+                          top: `${region.destination.y * 100}%`,
+                          width: `${region.destination.width * 100}%`,
+                          height: `${region.destination.height * 100}%`,
+                          border: selected ? `2px solid ${C.amber}` : "1px solid rgba(255,255,255,.25)",
+                          boxSizing: "border-box",
+                          cursor: region.locked ? "not-allowed" : "move",
+                          pointerEvents: "auto",
+                        }}>
+                        {selected && <><span style={{ position: "absolute", top: 3, left: 4, background: "rgba(0,0,0,.65)", color: "#fff", fontSize: 9, padding: "2px 4px", borderRadius: 4 }}>{region.name}</span>
+                          <span onPointerDown={(event) => startPortraitDrag(event, region.id, "resize")} style={{ position: "absolute", right: -5, bottom: -5, width: 11, height: 11, borderRadius: 2, background: C.amber, cursor: "nwse-resize" }} /></>}
+                      </div>
+                    );
+                  })}
+                  {portraitLayout.enabled && portraitLayout.regions.some((region) => region.type === "webcam") && portraitLayout.webcamPosition !== "overlay" && (
+                    <div onPointerDown={(event) => startPortraitDrag(event, "split", "split")} style={{
+                      position: "absolute",
+                      left: 0,
+                      right: 0,
+                      top: `${(portraitLayout.webcamPosition === "top" ? 1 - portraitLayout.splitRatio : portraitLayout.splitRatio) * 100}%`,
+                      height: 8,
+                      transform: "translateY(-50%)",
+                      cursor: "ns-resize",
+                      borderTop: `1px dashed ${C.amber}`,
+                      zIndex: 20,
+                    }} />
+                  )}
                   {/* safe area guides */}
                   {showSafe && (
                     <div style={{ position: "absolute", inset: "5% 5%", border: `1px dashed ${hexA(C.mint, 0.4)}`, borderRadius: 6, pointerEvents: "none" }}>
                       <div style={{ position: "absolute", left: 0, right: 0, top: "50%", borderTop: `1px dashed ${hexA(C.mint,0.2)}` }} />
+                      {portraitLayout.enabled && portraitLayout.safeArea !== "none" && <div style={{ position: "absolute", right: 0, top: "12%", bottom: "18%", width: "13%", borderLeft: `1px dashed ${hexA(C.pink,.5)}`, background: hexA(C.pink,.05) }} />}
                     </div>
                   )}
                   {/* active caption */}
@@ -1680,6 +1836,11 @@ export default function CaptionEditor({ onHome, incomingVideo, autoTranscribeTok
                   <span style={{ fontVariantNumeric: "tabular-nums", fontSize: 13, color: C.dim }}>{fmt(currentTime)} <span style={{ color: C.faint }}>/ {fmt(video.duration)}</span></span>
                   <div style={{ flex: 1 }} />
                   <Btn onClick={() => setShowSafe((s) => !s)} title="Safe-area guides">{showSafe ? <Eye size={13} /> : <EyeOff size={13} />} Safe</Btn>
+                  <select value={previewSize} onChange={(event) => setPreviewSize(event.target.value as typeof previewSize)} style={{ ...selS(), width: 105 }}>
+                    <option value="small">Small</option><option value="medium">Medium</option><option value="large">Large</option><option value="fit">Fit workspace</option>
+                  </select>
+                  <Btn onClick={() => setTheatreMode((value) => !value)} title="Theatre mode">{theatreMode ? "Exit theatre" : "Theatre"}</Btn>
+                  <Btn onClick={() => previewRef.current?.requestFullscreen?.()} title="Fullscreen preview">Fullscreen</Btn>
                   <Btn onClick={() => setLocked((l) => !l)} title="Lock caption position">{locked ? <Lock size={13} /> : <Unlock size={13} />}</Btn>
                 </div>
                 {/* timeline */}
@@ -1708,7 +1869,8 @@ export default function CaptionEditor({ onHome, incomingVideo, autoTranscribeTok
           </main>
 
           {/* ---------- RIGHT: presets + style ---------- */}
-          <aside className="cf-right" style={{ background: C.bg2, borderLeft: `1px solid ${C.line}`, overflow: "auto" }}>
+          <aside className="cf-right" style={{ background: C.bg2, borderLeft: `1px solid ${C.line}`, overflow: "auto", display: theatreMode ? "none" : undefined }}>
+            <PortraitLayoutPanel layout={portraitLayout} onChange={setPortraitLayout} video={video ? { url: video.url, duration: video.duration, w: video.w, h: video.h } : null} />
             {/* PRESET MANAGER — the centrepiece */}
             <div style={{ padding: 16, borderBottom: `1px solid ${C.line}` }}>
               <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12 }}>

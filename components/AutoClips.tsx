@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { Film, LoaderCircle, MessageCircle, Sparkles, Wand2 } from "lucide-react";
+import { Download, Film, LoaderCircle, MessageCircle, Sparkles, Wand2 } from "lucide-react";
 import { parseVodSource } from "@/lib/auto-clips";
 import { downloaderConnectionError, downloaderServiceUrl } from "@/lib/downloader";
 import LocalServiceWarning from "./LocalServiceWarning";
@@ -91,6 +91,30 @@ export default function AutoClips({ onAutoSubtitles }: {
     }
   }
 
+  async function downloadRawClip(clip: ClipResult) {
+    setLoadingClip(`download-${clip.id}`);
+    setError("");
+    try {
+      if (!serviceUrl) throw new Error(downloaderConnectionError(serviceUrl));
+      if (!clip.mediaPath) throw new Error("This generated clip has no downloadable media.");
+      const response = await fetch(`${serviceUrl}${clip.mediaPath}`);
+      if (!response.ok) throw new Error("The raw clip could not be loaded.");
+      const blob = await response.blob();
+      const objectUrl = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = objectUrl;
+      anchor.download = `${clip.title.replace(/[^\w -]/g, "").slice(0, 80) || "auto-clip"}.mp4`;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      setTimeout(() => URL.revokeObjectURL(objectUrl), 60_000);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "The raw clip could not be downloaded.");
+    } finally {
+      setLoadingClip("");
+    }
+  }
+
   return (
     <main style={{ height: "100vh", overflow: "auto", background: "#13111C", color: "#ECE8F3", fontFamily: "Inter, system-ui, sans-serif" }}>
       <header style={{ padding: "14px 20px", borderBottom: "1px solid #352D47", background: "#1A1724", fontWeight: 800 }}>
@@ -135,6 +159,7 @@ export default function AutoClips({ onAutoSubtitles }: {
               clips={result.generated}
               serviceUrl={serviceUrl}
               loadingClip={loadingClip}
+              onDownloadRaw={downloadRawClip}
               onAutoSubtitles={subtitleClip}
             />
           </>
@@ -145,12 +170,13 @@ export default function AutoClips({ onAutoSubtitles }: {
   );
 }
 
-function ResultSection({ title, empty, clips, serviceUrl, loadingClip, onAutoSubtitles }: {
+function ResultSection({ title, empty, clips, serviceUrl, loadingClip, onDownloadRaw, onAutoSubtitles }: {
   title: string;
   empty: string;
   clips: ClipResult[];
   serviceUrl: string;
   loadingClip: string;
+  onDownloadRaw: (clip: ClipResult) => void;
   onAutoSubtitles: (clip: ClipResult) => void;
 }) {
   return (
@@ -166,10 +192,20 @@ function ResultSection({ title, empty, clips, serviceUrl, loadingClip, onAutoSub
               <div style={{ padding: 14 }}>
                 <div style={{ fontWeight: 800, marginBottom: 6 }}>{clip.title}</div>
                 <div style={{ color: "#A99FC2", fontSize: 12, marginBottom: 12 }}>{clip.reason || clip.source}</div>
-                <button onClick={() => void onAutoSubtitles(clip)} disabled={loadingClip === clip.id} style={primaryButton(loadingClip === clip.id)}>
-                  {loadingClip === clip.id ? <LoaderCircle size={15} className="cf-spin" /> : <Wand2 size={15} />}
-                  Auto Subtitles
-                </button>
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                  <button
+                    onClick={() => void onDownloadRaw(clip)}
+                    disabled={loadingClip === `download-${clip.id}`}
+                    style={primaryButton(loadingClip === `download-${clip.id}`)}
+                  >
+                    {loadingClip === `download-${clip.id}` ? <LoaderCircle size={15} className="cf-spin" /> : <Download size={15} />}
+                    Download Raw
+                  </button>
+                  <button onClick={() => void onAutoSubtitles(clip)} disabled={loadingClip === clip.id} style={secondaryButton(loadingClip === clip.id)}>
+                    {loadingClip === clip.id ? <LoaderCircle size={15} className="cf-spin" /> : <Wand2 size={15} />}
+                    Auto Subtitles
+                  </button>
+                </div>
               </div>
             </article>
           ))}
@@ -203,5 +239,14 @@ function primaryButton(disabled: boolean): React.CSSProperties {
     fontWeight: 800,
     cursor: disabled ? "not-allowed" : "pointer",
     opacity: disabled ? 0.5 : 1,
+  };
+}
+
+function secondaryButton(disabled: boolean): React.CSSProperties {
+  return {
+    ...primaryButton(disabled),
+    background: "#2A2438",
+    color: "#ECE8F3",
+    border: "1px solid #473C5E",
   };
 }
