@@ -5,6 +5,7 @@ import {
   pipelineRuntimeOptions,
   recoverWordTimestamps,
 } from "../public/transcription-core.mjs";
+import { createSubtitleSegments } from "./subtitles";
 
 describe("transcription worker helpers", () => {
   it("forces the WASM backend instead of allowing WebGPU auto-selection", () => {
@@ -81,6 +82,42 @@ describe("transcription worker helpers", () => {
         { text: "three", timestamp: [1, null] },
       ],
     }, 2)).toMatchObject({ quality: "none", chunks: [] });
+  });
+
+  it("turns recovered word timings into accurately bounded subtitle cues", () => {
+    const recovered = recoverWordTimestamps({
+      chunks: [
+        { text: "Testing", timestamp: [0, 0.4] },
+        { text: "accurate", timestamp: [0.39, 0.8] },
+        { text: "word timing", timestamp: [0.8, 1.6] },
+        { text: "works", timestamp: [1.6, null] },
+        { text: ".", timestamp: [1.95, 2] },
+      ],
+    }, 2);
+
+    const timedChunks = recovered.chunks.map((chunk: {
+      text: string;
+      timestamp: number[];
+    }) => ({
+      text: chunk.text,
+      timestamp: [chunk.timestamp[0] ?? null, chunk.timestamp[1] ?? null] as [
+        number | null,
+        number | null,
+      ],
+    }));
+    const subtitles = createSubtitleSegments(timedChunks, {
+      maxWords: 8,
+      maxDuration: 5,
+    });
+
+    expect(recovered.quality).toBe("recovered-word");
+    expect(subtitles).toHaveLength(1);
+    expect(subtitles[0]).toMatchObject({
+      start: 0,
+      end: 2,
+      text: "Testing accurate word timing works.",
+    });
+    expect(subtitles[0].words).toHaveLength(5);
   });
 
 });

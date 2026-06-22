@@ -727,14 +727,21 @@ export default function CaptionEditor({ onHome, incomingVideo, autoTranscribeTok
       }
       const audio = await prepareAudio(video.file);
       if (!transcriptionWorkerRef.current) {
-        transcriptionWorkerRef.current = new Worker(asset("/transcription.worker.mjs?v=7"), { type: "module" });
+        transcriptionWorkerRef.current = new Worker(asset("/transcription.worker.mjs?v=8"), { type: "module" });
       }
       const worker = transcriptionWorkerRef.current;
       const result = await new Promise<{ chunks: { text: string; timestamp?: [number | null, number | null] }[]; text: string; device: "webgpu" | "wasm"; wordTimestamps: boolean; wordTimingQuality: "word" | "recovered-word" | "none" }>((resolve, reject) => {
         transcriptionRejectRef.current = reject;
+        let workerReady = false;
+        const startupTimeout = window.setTimeout(() => {
+          if (!workerReady) reject(new Error("The transcription worker timed out while starting. Reload the page and retry."));
+        }, 10_000);
         worker.onmessage = (event) => {
           const message = event.data;
-          if (message.type === "stage") {
+          if (message.type === "ready") {
+            workerReady = true;
+            window.clearTimeout(startupTimeout);
+          } else if (message.type === "stage") {
             updateTranscriptionStage(message.stage, message.status, message.detail || "");
           } else if (message.type === "model-progress") {
             setTranscription((current) => ({
@@ -755,17 +762,27 @@ export default function CaptionEditor({ onHome, incomingVideo, autoTranscribeTok
           } else if (message.type === "device-fallback") {
             setTranscription((current) => ({ ...current, detail: message.detail, device: "wasm" }));
           } else if (message.type === "result") {
+            window.clearTimeout(startupTimeout);
             transcriptionRejectRef.current = null;
             resolve(message);
           } else if (message.type === "cancelled") {
+            window.clearTimeout(startupTimeout);
             reject(new DOMException("Transcription cancelled", "AbortError"));
           } else if (message.type === "error") {
+            window.clearTimeout(startupTimeout);
             const error = new Error(message.message);
             error.name = message.backend === "wasm" ? "WasmTranscriptionError" : "WebGpuTranscriptionError";
             reject(error);
           }
         };
-        worker.onerror = () => reject(new Error("The transcription worker could not start."));
+        worker.onerror = (event) => {
+          window.clearTimeout(startupTimeout);
+          reject(new Error(
+            event.message
+              ? `The transcription worker could not start: ${event.message}`
+              : "The transcription worker could not start. Reload the page to clear cached worker files."
+          ));
+        };
         worker.postMessage({
           type: "transcribe",
           audio,

@@ -3,10 +3,14 @@ import {
   normalizeTranscriptionError,
   pipelineRuntimeOptions,
   recoverWordTimestamps,
-} from "./transcription-core.mjs";
+} from "./transcription-core.mjs?v=4";
 
+const workerUrl = new URL(self.location.href);
+const testModule = workerUrl.searchParams.get("testTransformers");
 const TRANSFORMERS_CDN =
-  "https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.8.1";
+  testModule && ["localhost", "127.0.0.1"].includes(workerUrl.hostname)
+    ? new URL(testModule, workerUrl).href
+    : "https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.8.1";
 
 let cancelled = false;
 let transcriber = null;
@@ -23,6 +27,10 @@ const MODEL_IDS = {
 function send(type, payload = {}) {
   self.postMessage({ type, ...payload });
 }
+
+// Lets the editor distinguish a successfully evaluated module worker from a
+// model/network error that happens later during transcription.
+send("ready", { workerVersion: 8 });
 
 async function loadPipeline(model, requestedDevice, forceReload = false) {
   const { pipeline, env } = await import(TRANSFORMERS_CDN);
@@ -89,6 +97,10 @@ self.onmessage = async (event) => {
     return;
   }
   if (message?.type !== "transcribe") return;
+
+  // Repeat the handshake for each job. Reused workers may have emitted their
+  // module-startup message before a new per-job listener was attached.
+  send("ready", { workerVersion: 8 });
 
   cancelled = false;
   let device = message.device === "webgpu" ? "webgpu" : "wasm";

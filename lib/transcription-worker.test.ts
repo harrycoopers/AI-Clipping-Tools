@@ -18,4 +18,9 @@ describe("transcription worker word timing configuration", () => {
     expect(worker).not.toContain("using segment timing");
     expect(worker).not.toContain("expandChunksToWords");
   });
+
+  it("cache-busts the helper module and announces successful startup", () => {
+    expect(worker).toMatch(/transcription-core\.mjs\?v=\d+/);
+    expect(worker).toContain('send("ready"');
+  });
 });
