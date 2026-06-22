@@ -1,4 +1,5 @@
 import {
+  applySpellingHints,
   detectSpeechRegions,
   isMissingCrossAttentionError,
   normalizeTranscriptionError,
@@ -6,7 +7,7 @@ import {
   pipelineRuntimeOptions,
   prepareAudioForRecognition,
   recoverWordTimestamps,
-} from "./transcription-core.mjs?v=6";
+} from "./transcription-core.mjs?v=7";
 
 const workerUrl = new URL(self.location.href);
 const testModule = workerUrl.searchParams.get("testTransformers");
@@ -40,8 +41,8 @@ function isEnglishOnlyLanguage(language) {
 function createRecognitionOptions(message, progressCallback) {
   const options = {
     return_timestamps: "word",
-    chunk_length_s: message.model === "accurate" ? 20 : 30,
-    stride_length_s: 5,
+    chunk_length_s: 30,
+    stride_length_s: message.model === "accurate" ? 8 : 5,
     // Avoid turning sustained background sounds into caption text.
     no_speech_threshold: 0.82,
     logprob_threshold: -1.2,
@@ -50,7 +51,7 @@ function createRecognitionOptions(message, progressCallback) {
     do_sample: false,
     temperature: 0,
     repetition_penalty: 1.08,
-    num_beams: message.model === "accurate" ? 5 : 1,
+    num_beams: message.model === "accurate" ? 8 : 1,
     early_stopping: message.model === "accurate",
     callback_function: progressCallback,
   };
@@ -70,7 +71,7 @@ function send(type, payload = {}) {
 
 // Lets the editor distinguish a successfully evaluated module worker from a
 // model/network error that happens later during transcription.
-send("ready", { workerVersion: 11 });
+send("ready", { workerVersion: 12 });
 
 async function loadPipeline(model, requestedDevice, language, forceReload = false) {
   const { pipeline, env } = await import(TRANSFORMERS_CDN);
@@ -131,10 +132,10 @@ async function recognizeWithTimestamps(recognizer, audio, options) {
   }
 }
 
-async function transcribeSpeechRegions(recognizer, audio, options) {
+async function transcribeSpeechRegions(recognizer, audio, options, maximumRecall, spellingHints) {
   const sampleRate = 16_000;
   const preparedAudio = prepareAudioForRecognition(audio);
-  const regions = detectSpeechRegions(preparedAudio, sampleRate);
+  const regions = detectSpeechRegions(preparedAudio, sampleRate, { maximumRecall });
   send("speech-regions", {
     count: regions.length,
     duration: audio.length / sampleRate,
@@ -169,9 +170,11 @@ async function transcribeSpeechRegions(recognizer, audio, options) {
     if (result.text?.trim()) text.push(result.text.trim());
     if (result.word_timing_quality !== "word") timingQuality = result.word_timing_quality;
   }
+  const correctedChunks = applySpellingHints(combined, spellingHints);
   return {
-    text: text.join(" ").trim(),
-    chunks: combined,
+    text: correctedChunks.map((chunk) => chunk.text).join(" ").replace(/\s+([,.!?;:])/g, "$1").trim()
+      || text.join(" ").trim(),
+    chunks: correctedChunks,
     word_timestamps: true,
     word_timing_quality: timingQuality,
   };
@@ -188,7 +191,7 @@ self.onmessage = async (event) => {
 
   // Repeat the handshake for each job. Reused workers may have emitted their
   // module-startup message before a new per-job listener was attached.
-  send("ready", { workerVersion: 11 });
+  send("ready", { workerVersion: 12 });
 
   cancelled = false;
   let device = message.device === "webgpu" ? "webgpu" : "wasm";
@@ -218,7 +221,13 @@ self.onmessage = async (event) => {
       });
     let result;
     try {
-      result = await transcribeSpeechRegions(recognizer, message.audio, options);
+      result = await transcribeSpeechRegions(
+        recognizer,
+        message.audio,
+        options,
+        message.model === "accurate",
+        message.spellingHints
+      );
     } catch (error) {
       if (device !== "webgpu" || message.allowFallback === false) throw error;
 
@@ -227,7 +236,13 @@ self.onmessage = async (event) => {
       });
       device = "wasm";
       recognizer = await loadPipeline(message.model, device, message.language, true);
-      result = await transcribeSpeechRegions(recognizer, message.audio, options);
+      result = await transcribeSpeechRegions(
+        recognizer,
+        message.audio,
+        options,
+        message.model === "accurate",
+        message.spellingHints
+      );
     }
     if (cancelled) return send("cancelled");
     send("stage", { stage: "transcription", status: "complete", detail: "Speech recognised" });

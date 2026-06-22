@@ -411,6 +411,7 @@ export default function CaptionEditor({ onHome, incomingVideo, autoTranscribeTok
   const [transcriptionOpen, setTranscriptionOpen] = useState(false);
   const [language, setLanguage] = useState("auto");
   const [transcriptionModel, setTranscriptionModel] = useState<TranscriptionModel>("balanced");
+  const [spellingHints, setSpellingHints] = useState("");
   const [preferWebGpu, setPreferWebGpu] = useState(true);
   const [lastTranscriptionFailed, setLastTranscriptionFailed] = useState(false);
   const [customFonts, setCustomFonts] = useState<CustomFont[]>([]);
@@ -481,6 +482,7 @@ export default function CaptionEditor({ onHome, incomingVideo, autoTranscribeTok
         if (["fast", "balanced", "accurate"].includes(project.transcriptionModel)) {
           setTranscriptionModel(project.transcriptionModel);
         }
+        if (typeof project.spellingHints === "string") setSpellingHints(project.spellingHints);
         if (typeof project.preferWebGpu === "boolean") setPreferWebGpu(project.preferWebGpu);
         if (project.portraitLayout?.regions) {
           setPortraitLayout({ ...createDefaultPortraitLayout(), ...project.portraitLayout });
@@ -514,6 +516,7 @@ export default function CaptionEditor({ onHome, incomingVideo, autoTranscribeTok
         applyDefaultToNew,
         language,
         transcriptionModel,
+        spellingHints,
         preferWebGpu,
         portraitLayout,
         customFonts: customFonts.filter((font) => font.dataUrl).map(({ name, dataUrl }) => ({ name, dataUrl })),
@@ -523,7 +526,7 @@ export default function CaptionEditor({ onHome, incomingVideo, autoTranscribeTok
     }
   }, [
     presets, defaultId, autoChoiceId, activePresetId, applyDefaultToNew,
-    language, transcriptionModel, preferWebGpu, customFonts, portraitLayout,
+    language, transcriptionModel, spellingHints, preferWebGpu, customFonts, portraitLayout,
   ]);
 
   useEffect(() => () => transcriptionWorkerRef.current?.terminate(), []);
@@ -750,7 +753,7 @@ export default function CaptionEditor({ onHome, incomingVideo, autoTranscribeTok
       }
       const audio = await prepareAudio(video.file);
       if (!transcriptionWorkerRef.current) {
-        transcriptionWorkerRef.current = new Worker(asset("/transcription.worker.mjs?v=11"), { type: "module" });
+        transcriptionWorkerRef.current = new Worker(asset("/transcription.worker.mjs?v=12"), { type: "module" });
       }
       const worker = transcriptionWorkerRef.current;
       const result = await new Promise<{ chunks: { text: string; timestamp?: [number | null, number | null] }[]; text: string; device: "webgpu" | "wasm"; wordTimestamps: boolean; wordTimingQuality: "word" | "recovered-word" | "none" }>((resolve, reject) => {
@@ -811,6 +814,7 @@ export default function CaptionEditor({ onHome, incomingVideo, autoTranscribeTok
           audio,
           model: transcriptionModel,
           language,
+          spellingHints,
           device: requestedDevice,
           allowFallback: true,
           forceReload,
@@ -1047,6 +1051,7 @@ export default function CaptionEditor({ onHome, incomingVideo, autoTranscribeTok
   function exportProject() {
     download("project.cfproj.json", JSON.stringify({
       kind: "captionforge-project", presets, defaultId, applyDefaultToNew, portraitLayout,
+      language, transcriptionModel, spellingHints,
       // eslint-disable-next-line @typescript-eslint/no-unused-vars
       segments: segments.map(({ id: _id, ...r }) => r), video: video ? { name: video.name, duration: video.duration } : null,
     }, null, 2), "application/json");
@@ -1057,6 +1062,9 @@ export default function CaptionEditor({ onHome, incomingVideo, autoTranscribeTok
       if (project.kind !== "captionforge-project") throw new Error("Invalid project");
       if (Array.isArray(project.presets) && project.presets.length) setPresets(project.presets);
       if (typeof project.defaultId === "string") setDefaultId(project.defaultId);
+      if (typeof project.language === "string") setLanguage(project.language);
+      if (["fast", "balanced", "accurate"].includes(project.transcriptionModel)) setTranscriptionModel(project.transcriptionModel);
+      if (typeof project.spellingHints === "string") setSpellingHints(project.spellingHints);
       if (Array.isArray(project.segments)) setSegments(project.segments.map((segment: Segment) => ({ ...segment, id: segment.id || uid() })));
       if (project.portraitLayout?.regions) setPortraitLayout({ ...createDefaultPortraitLayout(), ...project.portraitLayout });
       flash("Project imported");
@@ -2130,6 +2138,21 @@ export default function CaptionEditor({ onHome, incomingVideo, autoTranscribeTok
               </div>
               <div style={{ color: C.dim, fontSize: 11.5, marginTop: 7 }}>
                 Select the spoken language instead of Auto for best recall. English uses a dedicated English Whisper model.
+              </div>
+            </div>
+
+            <div style={{ padding: "0 18px 16px" }}>
+              <Field label="Names or slang spelling hints">
+                <input
+                  value={spellingHints}
+                  onChange={(event) => setSpellingHints(event.target.value)}
+                  disabled={transcribing}
+                  placeholder="rastaclart, Kai Cenat, Fortnite"
+                  style={{ ...inp(), width: "100%", padding: "9px 10px" }}
+                />
+              </Field>
+              <div style={{ color: C.faint, fontSize: 11.5, marginTop: -5 }}>
+                Optional, comma-separated. Use this for uncommon names, slang or game terms that sound similar to ordinary words.
               </div>
             </div>
 

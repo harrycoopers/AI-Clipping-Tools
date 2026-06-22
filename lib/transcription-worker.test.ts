@@ -30,8 +30,11 @@ describe("transcription worker word timing configuration", () => {
     expect(worker).toContain("temperature: 0");
     expect(worker).toContain("repetition_penalty: 1.08");
     expect(worker).toContain("condition_on_prev_tokens: false");
-    expect(worker).toContain('num_beams: message.model === "accurate" ? 5 : 1');
+    expect(worker).toContain('num_beams: message.model === "accurate" ? 8 : 1');
     expect(worker).toContain('no_speech_threshold: 0.82');
+    expect(worker).toContain('stride_length_s: message.model === "accurate" ? 8 : 5');
+    expect(worker).toContain("applySpellingHints");
+    expect(worker).toContain("message.model === \"accurate\"");
   });
 
   it("never passes multilingual options to an English-only model", () => {

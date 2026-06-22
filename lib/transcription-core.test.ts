@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  applySpellingHints,
   detectSpeechRegions,
   isMissingCrossAttentionError,
   offsetTimestampChunks,
@@ -39,6 +40,15 @@ describe("transcription worker helpers", () => {
     )).toBe(true);
   });
 
+  it("uses a lower speech floor in Accurate maximum-recall mode", () => {
+    const audio = new Float32Array(16_000 * 5);
+    for (let index = 16_000; index < 16_000 * 2; index += 1) {
+      audio[index] = Math.sin(index / 9) * 0.0003;
+    }
+    expect(detectSpeechRegions(audio)).toHaveLength(0);
+    expect(detectSpeechRegions(audio, 16_000, { maximumRecall: true })).toHaveLength(1);
+  });
+
   it("normalizes quiet audio without clipping it", () => {
     const audio = Float32Array.from({ length: 16_000 }, (_, index) =>
       Math.sin(index / 10) * 0.004
@@ -47,6 +57,15 @@ describe("transcription worker helpers", () => {
     const peak = Math.max(...prepared);
     expect(peak).toBeGreaterThan(0.02);
     expect(peak).toBeLessThanOrEqual(1);
+  });
+
+  it("corrects a close uncommon word only when the user supplies a spelling hint", () => {
+    const chunks = [{ text: "raso'clock", timestamp: [1, 1.6] }];
+    expect(applySpellingHints(chunks, "")[0].text).toBe("raso'clock");
+    expect(applySpellingHints(chunks, "rastaclart")[0]).toEqual({
+      text: "rastaclart",
+      timestamp: [1, 1.6],
+    });
   });
 
   it("restores source timeline offsets after speech-only transcription", () => {

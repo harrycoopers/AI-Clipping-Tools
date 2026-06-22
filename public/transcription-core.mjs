@@ -53,7 +53,7 @@ export function prepareAudioForRecognition(audio) {
   return filtered;
 }
 
-export function detectSpeechRegions(audio, sampleRate = 16_000) {
+export function detectSpeechRegions(audio, sampleRate = 16_000, options = {}) {
   if (!(audio instanceof Float32Array) || !audio.length) return [];
 
   const frameSize = Math.max(1, Math.round(sampleRate * 0.03));
@@ -73,16 +73,19 @@ export function detectSpeechRegions(audio, sampleRate = 16_000) {
     peak = Math.max(peak, rms);
   }
 
-  if (peak < 0.001) return [];
+  const maximumRecall = options.maximumRecall === true;
+  if (peak < (maximumRecall ? 0.0001 : 0.001)) return [];
   const sorted = Array.from(levels).sort((a, b) => a - b);
   const noiseFloor = sorted[Math.floor(sorted.length * 0.2)] || 0;
   // Use an adaptive floor instead of a large percentage of the loudest sound.
   // The latter discarded quiet words whenever a clip also contained a shout.
-  const threshold = Math.max(0.00045, noiseFloor * 2.2);
+  const threshold = maximumRecall
+    ? Math.max(0.0002, noiseFloor * 1.25)
+    : Math.max(0.00045, noiseFloor * 2.2);
   const active = Array.from(levels, (level) => level >= threshold);
 
   // Bridge very short dips inside speech and retain a small amount of context.
-  const bridgeFrames = Math.round(0.28 / 0.03);
+  const bridgeFrames = Math.round((maximumRecall ? 0.5 : 0.28) / 0.03);
   let lastActive = -1;
   for (let frame = 0; frame < active.length; frame += 1) {
     if (!active[frame]) continue;
@@ -93,7 +96,7 @@ export function detectSpeechRegions(audio, sampleRate = 16_000) {
   }
 
   const regions = [];
-  const padFrames = Math.round(0.45 / 0.03);
+  const padFrames = Math.round((maximumRecall ? 0.75 : 0.45) / 0.03);
   let startFrame = null;
   for (let frame = 0; frame <= active.length; frame += 1) {
     if (frame < active.length && active[frame] && startFrame == null) startFrame = frame;
@@ -119,7 +122,7 @@ export function detectSpeechRegions(audio, sampleRate = 16_000) {
   const merged = [];
   for (const region of regions) {
     const previous = merged.at(-1);
-    if (previous && region.speechStart - previous.speechEnd <= 1.4) {
+    if (previous && region.speechStart - previous.speechEnd <= (maximumRecall ? 2.2 : 1.4)) {
       previous.end = region.end;
       previous.speechEnd = region.speechEnd;
     } else {
@@ -127,6 +130,55 @@ export function detectSpeechRegions(audio, sampleRate = 16_000) {
     }
   }
   return merged;
+}
+
+function editDistance(left, right) {
+  const previous = Array.from({ length: right.length + 1 }, (_, index) => index);
+  for (let leftIndex = 1; leftIndex <= left.length; leftIndex += 1) {
+    const current = [leftIndex];
+    for (let rightIndex = 1; rightIndex <= right.length; rightIndex += 1) {
+      current[rightIndex] = Math.min(
+        current[rightIndex - 1] + 1,
+        previous[rightIndex] + 1,
+        previous[rightIndex - 1] + (left[leftIndex - 1] === right[rightIndex - 1] ? 0 : 1)
+      );
+    }
+    previous.splice(0, previous.length, ...current);
+  }
+  return previous[right.length];
+}
+
+export function applySpellingHints(chunks, rawHints) {
+  if (!Array.isArray(chunks) || typeof rawHints !== "string") return chunks || [];
+  const hints = rawHints
+    .split(/[\n,;]+/)
+    .map((hint) => hint.trim())
+    .filter((hint) => hint.length >= 3 && !/\s/.test(hint))
+    .slice(0, 50);
+  if (!hints.length) return chunks;
+
+  const normalizedHints = hints.map((hint) => ({
+    hint,
+    normalized: hint.toLocaleLowerCase().replace(/[^\p{L}\p{N}]/gu, ""),
+  })).filter((item) => item.normalized.length >= 3);
+
+  return chunks.map((chunk) => {
+    const text = String(chunk?.text || "");
+    const match = text.match(/^([^\p{L}\p{N}]*)([\p{L}\p{N}'’-]+)([^\p{L}\p{N}]*)$/u);
+    if (!match) return chunk;
+    const spoken = match[2].toLocaleLowerCase().replace(/[^\p{L}\p{N}]/gu, "");
+    if (spoken.length < 4) return chunk;
+
+    let best = null;
+    for (const candidate of normalizedHints) {
+      if (candidate.normalized[0] !== spoken[0]) continue;
+      const distance = editDistance(spoken, candidate.normalized);
+      const ratio = distance / Math.max(spoken.length, candidate.normalized.length);
+      if (ratio <= 0.5 && (!best || ratio < best.ratio)) best = { ...candidate, ratio };
+    }
+    if (!best) return chunk;
+    return { ...chunk, text: `${match[1]}${best.hint}${match[3]}` };
+  });
 }
 
 export function offsetTimestampChunks(
