@@ -1,11 +1,12 @@
 "use client";
 
 import { useState } from "react";
-import { Menu, Scissors, Wand2 } from "lucide-react";
+import { Download, Menu, Scissors, Wand2 } from "lucide-react";
 import AutoClips from "./AutoClips";
 import CaptionEditor from "./CaptionEditor";
+import VideoDownloader from "./VideoDownloader";
 
-type View = "subtitles" | "clips";
+type View = "subtitles" | "clips" | "downloader";
 
 export default function CaptionForgeApp() {
   const [view, setView] = useState<View>("subtitles");
@@ -29,6 +30,7 @@ export default function CaptionForgeApp() {
         <nav aria-label="Tools">
           <ToolButton active={view === "subtitles"} icon={<Wand2 size={18} />} label="Auto-Subtitles" onClick={() => setView("subtitles")} />
           <ToolButton active={view === "clips"} icon={<Scissors size={18} />} label="Auto Clips" onClick={() => setView("clips")} />
+          <ToolButton active={view === "downloader"} icon={<Download size={18} />} label="Clip Downloader" onClick={() => setView("downloader")} />
         </nav>
       </aside>
       <div className="cf-main-content">
@@ -36,6 +38,7 @@ export default function CaptionForgeApp() {
           <CaptionEditor incomingVideo={incomingClip} autoTranscribeToken={autoTranscribeToken} />
         </div>
         {view === "clips" && <AutoClips onAutoSubtitles={sendToSubtitles} />}
+        {view === "downloader" && <VideoDownloader />}
       </div>
       <style>{`
         .cf-shell{height:100vh;display:flex;overflow:hidden;background:#13111C;color:#ECE8F3;font-family:Inter,system-ui,sans-serif}

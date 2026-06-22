@@ -4,6 +4,7 @@ import { useState } from "react";
 import { Film, LoaderCircle, MessageCircle, Sparkles, Wand2 } from "lucide-react";
 import { parseVodSource } from "@/lib/auto-clips";
 import { downloaderConnectionError, downloaderServiceUrl } from "@/lib/downloader";
+import LocalServiceWarning from "./LocalServiceWarning";
 
 interface ClipResult {
   id: string;
@@ -96,6 +97,7 @@ export default function AutoClips({ onAutoSubtitles }: {
         Auto Clips
       </header>
       <section style={{ width: "min(1100px, calc(100% - 32px))", margin: "0 auto", padding: "52px 0 80px" }}>
+        <LocalServiceWarning />
         <Sparkles size={34} color="#FFCA3A" />
         <h1 style={{ margin: "14px 0 10px", fontSize: "clamp(32px, 5vw, 52px)" }}>Find stream highlights</h1>
         <p style={{ color: "#A99FC2", lineHeight: 1.6, maxWidth: 760 }}>

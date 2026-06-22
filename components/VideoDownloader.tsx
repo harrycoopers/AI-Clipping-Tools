@@ -7,6 +7,7 @@ import {
   downloaderConnectionError,
   downloaderServiceUrl,
 } from "@/lib/downloader";
+import LocalServiceWarning from "./LocalServiceWarning";
 
 export default function VideoDownloader() {
   const [url, setUrl] = useState("");
@@ -79,6 +80,7 @@ export default function VideoDownloader() {
       </header>
 
       <section style={{ width: "min(760px, calc(100% - 32px))", margin: "0 auto", padding: "70px 0" }}>
+        <LocalServiceWarning />
         <div style={{ color: "#FFCA3A", marginBottom: 16 }}><Download size={34} /></div>
         <h1 style={{ fontSize: "clamp(32px, 6vw, 54px)", margin: "0 0 12px", lineHeight: 1.05 }}>Download source videos</h1>
         <p style={{ color: "#A99FC2", fontSize: 16, lineHeight: 1.6, marginBottom: 28 }}>

@@ -30,6 +30,7 @@ https://harrycoopers.github.io/AI-Clipping-Tools/
 - SRT/VTT import, SRT + project-JSON export
 - Auto-Subtitles opens directly, with an Auto Clips tool for Twitch/Kick VOD
   highlight detection and one-click subtitle handoff
+- Clip Downloader is available again for supported video links
 - Auto Clips ranks retrieved chat-reaction spikes when replay data is exposed
   by the platform extractor, with audio-reaction analysis as the fallback
 
@@ -69,6 +70,8 @@ npm run dev
 On Windows, `downloader:setup` installs current official nightly builds into
 the project's ignored `tools/` directory. `npm run dev` starts both Next.js and
 the media service. Use `npm run dev:web` to start only the static frontend.
+Auto Clips and Clip Downloader display a local-service warning because both
+require `npm run dev`; browser-only Auto-Subtitles does not.
 
 
 The local app connects to port `4317` by default. For a deployed frontend,
