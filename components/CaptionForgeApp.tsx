@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { Download, Type, Wand2 } from "lucide-react";
+import { Download, Menu, Wand2 } from "lucide-react";
 import CaptionEditor from "./CaptionEditor";
 import VideoDownloader from "./VideoDownloader";
 
@@ -19,17 +19,20 @@ const colors = {
 
 export default function CaptionForgeApp() {
   const [view, setView] = useState<View>("editor");
+  const [sidebarOpen, setSidebarOpen] = useState(true);
 
   return (
-    <div className="cf-shell">
+    <div className={`cf-shell${sidebarOpen ? "" : " cf-sidebar-collapsed"}`}>
       <aside className="cf-tool-sidebar">
         <button
-          className="cf-sidebar-brand"
-          onClick={() => setView("editor")}
-          title="CaptionForge — Auto-Subtitles"
+          className="cf-sidebar-toggle"
+          onClick={() => setSidebarOpen((open) => !open)}
+          title={sidebarOpen ? "Collapse sidebar" : "Expand sidebar"}
+          aria-label={sidebarOpen ? "Collapse sidebar" : "Expand sidebar"}
+          aria-expanded={sidebarOpen}
         >
-          <span className="cf-sidebar-logo"><Type size={19} color="#1a1300" strokeWidth={2.6} /></span>
-          <span className="cf-sidebar-brand-name">Caption<span>Forge</span></span>
+          <Menu size={21} />
+          <span className="cf-sidebar-toggle-label">CaptionForge</span>
         </button>
 
         <div className="cf-sidebar-label">Tools</div>
@@ -77,34 +80,30 @@ export default function CaptionForgeApp() {
           position: relative;
           z-index: 100;
         }
-        .cf-sidebar-brand {
+        .cf-sidebar-toggle {
           display: flex;
           align-items: center;
-          gap: 9px;
-          border: 0;
-          background: transparent;
+          gap: 11px;
+          min-height: 38px;
+          border: 1px solid transparent;
+          border-radius: 9px;
+          background: ${colors.panel};
           color: ${colors.text};
-          padding: 0 4px 18px;
+          padding: 8px 10px;
+          margin-bottom: 14px;
           cursor: pointer;
           text-align: left;
           font: inherit;
         }
-        .cf-sidebar-logo {
-          width: 32px;
-          height: 32px;
-          flex: 0 0 32px;
-          border-radius: 9px;
-          background: ${colors.amber};
-          display: grid;
-          place-items: center;
-          box-shadow: 0 0 20px rgba(255,202,58,.25);
+        .cf-sidebar-toggle:hover {
+          border-color: ${colors.line};
+          color: ${colors.amber};
         }
-        .cf-sidebar-brand-name {
+        .cf-sidebar-toggle-label {
           font-weight: 800;
-          font-size: 15px;
+          font-size: 14px;
           white-space: nowrap;
         }
-        .cf-sidebar-brand-name span { color: ${colors.amber}; }
         .cf-sidebar-label {
           padding: 4px 10px 8px;
           color: #6E6486;
@@ -145,10 +144,28 @@ export default function CaptionForgeApp() {
           flex: 1;
           overflow: hidden;
         }
+        .cf-sidebar-collapsed .cf-tool-sidebar {
+          width: 64px;
+          flex-basis: 64px;
+          padding-inline: 8px;
+        }
+        .cf-sidebar-collapsed .cf-sidebar-toggle {
+          justify-content: center;
+          padding-inline: 0;
+        }
+        .cf-sidebar-collapsed .cf-sidebar-toggle-label,
+        .cf-sidebar-collapsed .cf-sidebar-label,
+        .cf-sidebar-collapsed .cf-sidebar-tool-label {
+          display: none;
+        }
+        .cf-sidebar-collapsed .cf-sidebar-tool {
+          justify-content: center;
+          padding-inline: 0;
+        }
         @media (max-width: 850px) {
           .cf-tool-sidebar { width: 64px; flex-basis: 64px; padding-inline: 8px; }
-          .cf-sidebar-brand { justify-content: center; padding-inline: 0; }
-          .cf-sidebar-brand-name, .cf-sidebar-label, .cf-sidebar-tool-label { display: none; }
+          .cf-sidebar-toggle { justify-content: center; padding-inline: 0; }
+          .cf-sidebar-toggle-label, .cf-sidebar-label, .cf-sidebar-tool-label { display: none; }
           .cf-sidebar-tool { justify-content: center; padding-inline: 0; }
         }
       `}</style>
