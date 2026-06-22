@@ -1,9 +1,8 @@
 import {
-  hasGenuineWordTimestamps,
   isMissingCrossAttentionError,
-  normalizeWordChunks,
   normalizeTranscriptionError,
   pipelineRuntimeOptions,
+  recoverWordTimestamps,
 } from "./transcription-core.mjs";
 
 const TRANSFORMERS_CDN =
@@ -64,13 +63,15 @@ async function loadPipeline(model, requestedDevice, forceReload = false) {
 async function recognizeWithTimestamps(recognizer, audio, options) {
   try {
     const result = await recognizer(audio, options);
-    if (!hasGenuineWordTimestamps(result)) {
-      throw new Error("The transcription model did not return genuine word-level timestamps.");
+    const recovered = recoverWordTimestamps(result, audio.length / 16_000);
+    if (!recovered.chunks.length) {
+      throw new Error("The transcription model returned text without usable timestamp boundaries.");
     }
     return {
       ...result,
-      chunks: normalizeWordChunks(result.chunks),
+      chunks: recovered.chunks,
       word_timestamps: true,
+      word_timing_quality: recovered.quality,
     };
   } catch (error) {
     if (isMissingCrossAttentionError(error)) {
@@ -147,6 +148,7 @@ self.onmessage = async (event) => {
       chunks: Array.isArray(result?.chunks) ? result.chunks : [],
       device,
       wordTimestamps: result?.word_timestamps === true,
+      wordTimingQuality: result?.word_timing_quality || "none",
     });
   } catch (error) {
     if (!cancelled) {

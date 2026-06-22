@@ -14,7 +14,7 @@ describe("transcription worker word timing configuration", () => {
 
   it("requires genuine word timestamps and never estimates them from segments", () => {
     expect(worker).toContain('return_timestamps: "word"');
-    expect(worker).toContain("hasGenuineWordTimestamps");
+    expect(worker).toContain("recoverWordTimestamps");
     expect(worker).not.toContain("using segment timing");
     expect(worker).not.toContain("expandChunksToWords");
   });

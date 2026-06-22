@@ -1,10 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 
 import {
-  hasGenuineWordTimestamps,
   isMissingCrossAttentionError,
-  normalizeWordChunks,
   pipelineRuntimeOptions,
+  recoverWordTimestamps,
 } from "../public/transcription-core.mjs";
 
 describe("transcription worker helpers", () => {
@@ -28,30 +27,60 @@ describe("transcription worker helpers", () => {
     )).toBe(true);
   });
 
-  it("accepts only genuine one-word timestamp chunks", () => {
-    expect(hasGenuineWordTimestamps({
+  it("preserves direct one-word timestamp chunks", () => {
+    expect(recoverWordTimestamps({
       chunks: [
         { text: " Hello", timestamp: [0.2, 0.55] },
         { text: "world.", timestamp: [0.56, 1.02] },
       ],
-    })).toBe(true);
-    expect(hasGenuineWordTimestamps({
-      chunks: [{ text: "Hello world", timestamp: [0.2, 1.02] }],
-    })).toBe(false);
-    expect(hasGenuineWordTimestamps({
-      chunks: [{ text: "Hello", timestamp: [null, 1.02] }],
-    })).toBe(false);
+    }, 1.1)).toMatchObject({
+      quality: "word",
+      chunks: [
+        { text: "Hello", timestamp: [0.2, 0.55] },
+        { text: "world.", timestamp: [0.56, 1.02] },
+      ],
+    });
   });
 
-  it("repairs tiny floating-point overlaps without estimating timings", () => {
-    const chunks = normalizeWordChunks([
-      { text: " Hello", timestamp: [0.2, 0.55] },
-      { text: " world", timestamp: [0.549, 1.02] },
-    ]) as { text: string; timestamp: [number, number] }[];
-    expect(chunks).toEqual([
-      { text: "Hello", timestamp: [0.2, 0.55] },
-      { text: "world", timestamp: [0.55, 1.02] },
-    ]);
+  it("repairs punctuation chunks, a null final end, and tiny overlaps", () => {
+    expect(recoverWordTimestamps({
+      chunks: [
+        { text: " Hello", timestamp: [0.2, 0.55] },
+        { text: ",", timestamp: [0.55, 0.57] },
+        { text: " world", timestamp: [0.549, 1.02] },
+        { text: " again", timestamp: [1.03, null] },
+      ],
+    }, 1.4)).toMatchObject({
+      quality: "word",
+      chunks: [
+        { text: "Hello,", timestamp: [0.2, 0.57] },
+        { text: "world", timestamp: [0.57, 1.02] },
+        { text: "again", timestamp: [1.03, 1.4] },
+      ],
+    });
+  });
+
+  it("subdivides only inside a model-timed multi-word span", () => {
+    const result = recoverWordTimestamps({
+      chunks: [
+        { text: "This grouped phrase", timestamp: [2, 3.2] },
+        { text: "ends", timestamp: [3.2, 3.6] },
+      ],
+    }, 4);
+    expect(result.quality).toBe("recovered-word");
+    expect(result.chunks.map((chunk: { text: string }) => chunk.text)).toEqual(["This", "grouped", "phrase", "ends"]);
+    expect(result.chunks[0].timestamp[0]).toBe(2);
+    expect(result.chunks.at(-1)?.timestamp[1]).toBe(3.6);
+  });
+
+  it("rejects text when most chunks have no model timestamp boundary", () => {
+    expect(recoverWordTimestamps({
+      chunks: [
+        { text: "one" },
+        { text: "two" },
+        { text: "three", timestamp: [1, null] },
+      ],
+    }, 2)).toMatchObject({ quality: "none", chunks: [] });
   });
 
 });

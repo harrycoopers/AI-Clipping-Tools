@@ -727,10 +727,10 @@ export default function CaptionEditor({ onHome, incomingVideo, autoTranscribeTok
       }
       const audio = await prepareAudio(video.file);
       if (!transcriptionWorkerRef.current) {
-        transcriptionWorkerRef.current = new Worker(asset("/transcription.worker.mjs?v=6"), { type: "module" });
+        transcriptionWorkerRef.current = new Worker(asset("/transcription.worker.mjs?v=7"), { type: "module" });
       }
       const worker = transcriptionWorkerRef.current;
-      const result = await new Promise<{ chunks: { text: string; timestamp?: [number | null, number | null] }[]; text: string; device: "webgpu" | "wasm"; wordTimestamps: boolean }>((resolve, reject) => {
+      const result = await new Promise<{ chunks: { text: string; timestamp?: [number | null, number | null] }[]; text: string; device: "webgpu" | "wasm"; wordTimestamps: boolean; wordTimingQuality: "word" | "recovered-word" | "none" }>((resolve, reject) => {
         transcriptionRejectRef.current = reject;
         worker.onmessage = (event) => {
           const message = event.data;
@@ -777,8 +777,8 @@ export default function CaptionEditor({ onHome, incomingVideo, autoTranscribeTok
         }, [audio.buffer]);
       });
 
-      if (!result.wordTimestamps) {
-        throw new Error("Whisper returned no genuine word timestamps. Retry to reload the timestamp-compatible model.");
+      if (!result.wordTimestamps || !result.chunks.length) {
+        throw new Error("Whisper returned no usable word timestamps. Retry to reload the timestamp-compatible model.");
       }
       updateTranscriptionStage("subtitles", "active", "Creating subtitles from accurate word timing");
       const raw = createSubtitleSegments(result.chunks, {
@@ -805,7 +805,7 @@ export default function CaptionEditor({ onHome, incomingVideo, autoTranscribeTok
         ...current,
         device: result.device,
         stage: "subtitles",
-        detail: `Created ${normalized.length} editable subtitles with word timing`,
+        detail: `Created ${normalized.length} editable subtitles with ${result.wordTimingQuality === "word" ? "direct" : "recovered"} word timing`,
         stages: { ...current.stages, subtitles: "complete" },
       }));
       flash(`Generated ${normalized.length} subtitles with “${resolvedAutoPreset.name}”`);
