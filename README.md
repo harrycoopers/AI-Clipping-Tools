@@ -28,11 +28,10 @@ https://harrycoopers.github.io/AI-Clipping-Tools/
 - **In-browser MP4 export** — captions are burned in with Canvas and encoded
   with WebCodecs into a fast-start, seek-validated MP4 that downloads locally.
 - SRT/VTT import, SRT + project-JSON export
-- Persistent left sidebar for switching between Auto-Subtitles and Clip
-  Downloader; Auto-Subtitles opens by default
-- Optional companion downloader for permitted YouTube, YouTube Shorts, TikTok,
-  Twitch VOD, and Kick VOD/clip sources, up to the source's available
-  1080p/60fps quality
+- Auto-Subtitles opens directly, with an Auto Clips tool for Twitch/Kick VOD
+  highlight detection and one-click subtitle handoff
+- Auto Clips ranks retrieved chat-reaction spikes when replay data is exposed
+  by the platform extractor, with audio-reaction analysis as the fallback
 
 ## Browser requirements and limitations
 
@@ -58,18 +57,19 @@ npm run dev          # http://localhost:3000  (dev has no base path)
 
 No environment variables or API keys are needed for the subtitle editor.
 
-## Video Downloader service
+## Auto Clips media service
 
-Install `yt-dlp` and FFmpeg so both commands are on your `PATH`, then run:
+Auto Clips needs the local media service, `yt-dlp`, and FFmpeg:
 
 ```bash
 npm run downloader:setup
-npm run downloader:server
+npm run dev
 ```
 
 On Windows, `downloader:setup` installs current official nightly builds into
-the project's ignored `tools/` directory. `npm run dev` now starts both the web
-app and downloader service; use `npm run dev:web` to start only Next.js.
+the project's ignored `tools/` directory. `npm run dev` starts both Next.js and
+the media service. Use `npm run dev:web` to start only the static frontend.
+
 
 The local app connects to port `4317` by default. For a deployed frontend,
 host the service separately over HTTPS and set `NEXT_PUBLIC_DOWNLOADER_API_URL`

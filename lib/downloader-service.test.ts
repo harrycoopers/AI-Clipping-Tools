@@ -65,4 +65,20 @@ describe("downloader service routing", () => {
     });
     expect(response.status).toBe(400);
   });
+
+  it.each([
+    "https://www.twitch.tv/videos/123",
+    "https://kick.com/example/videos/abc",
+  ])("routes Auto Clips VOD analysis for %s", async (url) => {
+    const response = await fetch(`${serviceUrl}/api/auto-clips/analyze`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url }),
+    });
+    expect(response.status).toBe(503);
+    expect(await response.json()).toMatchObject({
+      ytDlp: { available: false },
+      ffmpeg: { available: false },
+    });
+  });
 });

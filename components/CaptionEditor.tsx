@@ -375,7 +375,11 @@ const Section = ({ title, icon, children, defaultOpen = true }: {
 // ===========================================================================
 //  Main app
 // ===========================================================================
-export default function CaptionEditor({ onHome }: { onHome?: () => void }) {
+export default function CaptionEditor({ onHome, incomingVideo, autoTranscribeToken = 0 }: {
+  onHome?: () => void;
+  incomingVideo?: File | null;
+  autoTranscribeToken?: number;
+}) {
   // ---- presets ----
   const [presets, setPresets] = useState<Preset[]>(() => {
     const lib = PRESET_LIBRARY.map((p) => ({ id: uid(), name: p.name, builtin: false, style: p.style }));
@@ -534,6 +538,13 @@ export default function CaptionEditor({ onHome }: { onHome?: () => void }) {
     v.onerror = () => flash("Could not read this video file");
     v.src = url;
   }
+
+  const incomingVideoTokenRef = useRef(0);
+  useEffect(() => {
+    if (!incomingVideo || !autoTranscribeToken || incomingVideoTokenRef.current === autoTranscribeToken) return;
+    incomingVideoTokenRef.current = autoTranscribeToken;
+    loadVideo(incomingVideo);
+  }, [incomingVideo, autoTranscribeToken]);
 
   // ---- custom font upload ----
   function loadFont(file: File | undefined | null) {
@@ -778,6 +789,15 @@ export default function CaptionEditor({ onHome }: { onHome?: () => void }) {
       setTranscribing(false);
     }
   }
+
+  const autoTranscribedTokenRef = useRef(0);
+  useEffect(() => {
+    if (!video || !autoTranscribeToken || autoTranscribedTokenRef.current === autoTranscribeToken) return;
+    if (video.file !== incomingVideo) return;
+    autoTranscribedTokenRef.current = autoTranscribeToken;
+    setTranscriptionOpen(true);
+    void startTranscription(false);
+  }, [video, incomingVideo, autoTranscribeToken]);
 
   function cancelTranscription() {
     transcriptionWorkerRef.current?.postMessage({ type: "cancel" });
