@@ -33,13 +33,44 @@ const ENGLISH_MODEL_IDS = {
   accurate: "Xenova/whisper-small.en",
 };
 
+function isEnglishOnlyLanguage(language) {
+  return language === "english" || language === "en";
+}
+
+function createRecognitionOptions(message, progressCallback) {
+  const options = {
+    return_timestamps: "word",
+    chunk_length_s: message.model === "accurate" ? 20 : 30,
+    stride_length_s: 5,
+    // Avoid turning sustained background sounds into caption text.
+    no_speech_threshold: 0.82,
+    logprob_threshold: -1.2,
+    compression_ratio_threshold: 2.4,
+    condition_on_prev_tokens: false,
+    do_sample: false,
+    temperature: 0,
+    repetition_penalty: 1.08,
+    num_beams: message.model === "accurate" ? 5 : 1,
+    early_stopping: message.model === "accurate",
+    callback_function: progressCallback,
+  };
+
+  // English-only Whisper exports reject task/language generation arguments.
+  // Multilingual exports need them to transcribe in the selected language.
+  if (!isEnglishOnlyLanguage(message.language)) {
+    options.task = "transcribe";
+    options.language = message.language === "auto" ? null : message.language;
+  }
+  return options;
+}
+
 function send(type, payload = {}) {
   self.postMessage({ type, ...payload });
 }
 
 // Lets the editor distinguish a successfully evaluated module worker from a
 // model/network error that happens later during transcription.
-send("ready", { workerVersion: 10 });
+send("ready", { workerVersion: 11 });
 
 async function loadPipeline(model, requestedDevice, language, forceReload = false) {
   const { pipeline, env } = await import(TRANSFORMERS_CDN);
@@ -52,7 +83,7 @@ async function loadPipeline(model, requestedDevice, language, forceReload = fals
     env.backends.onnx.wasm.proxy = false;
   }
 
-  const englishOnly = language === "english" || language === "en";
+  const englishOnly = isEnglishOnlyLanguage(language);
   const modelIds = englishOnly ? ENGLISH_MODEL_IDS : MODEL_IDS;
   const modelId = modelIds[model] || modelIds.balanced;
   const device = requestedDevice === "webgpu" ? "webgpu" : "wasm";
@@ -157,7 +188,7 @@ self.onmessage = async (event) => {
 
   // Repeat the handshake for each job. Reused workers may have emitted their
   // module-startup message before a new per-job listener was attached.
-  send("ready", { workerVersion: 10 });
+  send("ready", { workerVersion: 11 });
 
   cancelled = false;
   let device = message.device === "webgpu" ? "webgpu" : "wasm";
@@ -177,31 +208,14 @@ self.onmessage = async (event) => {
     if (cancelled) return send("cancelled");
 
     send("stage", { stage: "transcription", status: "active", detail: "Recognising speech" });
-    const options = {
-      return_timestamps: "word",
-      chunk_length_s: message.model === "accurate" ? 20 : 30,
-      stride_length_s: 5,
-      task: "transcribe",
-      language: message.language === "auto" ? null : message.language,
-      // Avoid turning sustained background sounds into caption text.
-      no_speech_threshold: 0.82,
-      logprob_threshold: -1.2,
-      compression_ratio_threshold: 2.4,
-      condition_on_prev_tokens: false,
-      do_sample: false,
-      temperature: 0,
-      repetition_penalty: 1.08,
-      num_beams: message.model === "accurate" ? 5 : 1,
-      early_stopping: message.model === "accurate",
-      callback_function: (items) => {
+    const options = createRecognitionOptions(message, (items) => {
         if (cancelled) return;
         const last = Array.isArray(items) ? items.at(-1) : null;
         send("transcription-progress", {
           text: last?.text || "",
           timestamp: last?.timestamp || null,
         });
-      },
-    };
+      });
     let result;
     try {
       result = await transcribeSpeechRegions(recognizer, message.audio, options);

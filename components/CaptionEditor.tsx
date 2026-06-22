@@ -750,7 +750,7 @@ export default function CaptionEditor({ onHome, incomingVideo, autoTranscribeTok
       }
       const audio = await prepareAudio(video.file);
       if (!transcriptionWorkerRef.current) {
-        transcriptionWorkerRef.current = new Worker(asset("/transcription.worker.mjs?v=10"), { type: "module" });
+        transcriptionWorkerRef.current = new Worker(asset("/transcription.worker.mjs?v=11"), { type: "module" });
       }
       const worker = transcriptionWorkerRef.current;
       const result = await new Promise<{ chunks: { text: string; timestamp?: [number | null, number | null] }[]; text: string; device: "webgpu" | "wasm"; wordTimestamps: boolean; wordTimingQuality: "word" | "recovered-word" | "none" }>((resolve, reject) => {

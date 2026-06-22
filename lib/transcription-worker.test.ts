@@ -34,6 +34,14 @@ describe("transcription worker word timing configuration", () => {
     expect(worker).toContain('no_speech_threshold: 0.82');
   });
 
+  it("never passes multilingual options to an English-only model", () => {
+    expect(worker).toContain("if (!isEnglishOnlyLanguage(message.language))");
+    expect(worker).toContain('options.task = "transcribe"');
+    expect(worker).toContain('options.language = message.language === "auto" ? null : message.language');
+    expect(worker.indexOf("if (!isEnglishOnlyLanguage(message.language))"))
+      .toBeLessThan(worker.indexOf('options.task = "transcribe"'));
+  });
+
   it("cache-busts the helper module and announces successful startup", () => {
     expect(worker).toMatch(/transcription-core\.mjs\?v=\d+/);
     expect(worker).toContain('send("ready"');
