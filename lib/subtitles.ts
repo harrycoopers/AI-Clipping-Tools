@@ -60,6 +60,24 @@ export interface TranscriptChunk {
   timestamp?: [number | null, number | null];
 }
 
+const NON_SPEECH_CUE = /^(?:music|musical interlude|instrumental|background music|applause|clapping|laughter|laughing|cheering|crowd noise|noise|silence)$/i;
+
+/** Remove cue-only sound descriptions while preserving ordinary speech. */
+export function cleanTranscriptChunkText(text: string): string {
+  const trimmed = text.trim();
+  if (!trimmed) return "";
+
+  const withoutNotes = trimmed.replace(/[♪♫♬♩]+/g, "").trim();
+  const cue = withoutNotes
+    .replace(/^\[([^\]]+)\]$/, "$1")
+    .replace(/^\(([^)]+)\)$/, "$1")
+    .replace(/^<([^>]+)>$/, "$1")
+    .trim();
+
+  if (!withoutNotes || NON_SPEECH_CUE.test(cue)) return "";
+  return trimmed.replace(/[♪♫♬♩]+/g, "").replace(/\s+/g, " ").trim();
+}
+
 export const ORIGINAL_DEFAULT: SubtitleStyle = {
   fontFamily: "Anton",
   customFontName: null,
@@ -209,7 +227,7 @@ export function createSubtitleSegments(
   let fallbackStart = 0;
 
   for (const chunk of chunks) {
-    const text = chunk.text.trim();
+    const text = cleanTranscriptChunkText(chunk.text);
     if (!text) continue;
     const start = Math.max(fallbackStart, chunk.timestamp?.[0] ?? fallbackStart);
     const estimatedDuration = Math.max(0.18, text.replace(/\s+/g, "").length * 0.055);

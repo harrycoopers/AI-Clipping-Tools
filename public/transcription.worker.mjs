@@ -122,6 +122,11 @@ self.onmessage = async (event) => {
       stride_length_s: 5,
       task: "transcribe",
       language: message.language === "auto" ? null : message.language,
+      // Avoid turning sustained background sounds into caption text.
+      no_speech_threshold: 0.6,
+      logprob_threshold: -1,
+      compression_ratio_threshold: 2.4,
+      condition_on_prev_tokens: false,
       callback_function: (items) => {
         if (cancelled) return;
         const last = Array.isArray(items) ? items.at(-1) : null;

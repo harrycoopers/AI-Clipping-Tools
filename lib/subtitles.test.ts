@@ -10,6 +10,7 @@ import {
   splitSegment,
   mergeSegments,
   createSubtitleSegments,
+  cleanTranscriptChunkText,
   clamp,
   ORIGINAL_DEFAULT,
   type Preset,
@@ -164,6 +165,21 @@ describe("ORIGINAL_DEFAULT matches the spec", () => {
 });
 
 describe("createSubtitleSegments", () => {
+  it("removes cue-only non-speech annotations", () => {
+    expect(cleanTranscriptChunkText("[Music]")).toBe("");
+    expect(cleanTranscriptChunkText("♪ music ♪")).toBe("");
+    expect(cleanTranscriptChunkText("(applause)")).toBe("");
+    expect(cleanTranscriptChunkText("I love music")).toBe("I love music");
+
+    const result = createSubtitleSegments([
+      { text: "Hello", timestamp: [0, 0.4] },
+      { text: "[Music]", timestamp: [0.4, 1.2] },
+      { text: "there", timestamp: [1.2, 1.6] },
+    ], { maxWords: 8, maxDuration: 5 });
+    expect(result.map((cue) => cue.text)).toEqual(["Hello", "there"]);
+    expect(result.some((cue) => /music/i.test(cue.text))).toBe(false);
+  });
+
   it("splits on punctuation and preserves word timestamps", () => {
     const result = createSubtitleSegments([
       { text: "Hello", timestamp: [0, 0.4] },

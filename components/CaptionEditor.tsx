@@ -184,6 +184,7 @@ function CaptionLayer({ seg, style, previewH, currentTime, dragging }: {
     fontStyle: style.italic ? "italic" : "normal",
     color: style.color,
     letterSpacing: `${style.letterSpacing * (fontPx / 30)}px`,
+    wordSpacing: "0.16em",
     lineHeight: style.lineSpacing,
     textShadow: shadows.join(", "),
     textAlign: style.align,
@@ -223,10 +224,11 @@ function CaptionLayer({ seg, style, previewH, currentTime, dragging }: {
                   padding: style.highlightBg !== "transparent" ? "0 .12em" : 0,
                   transition: "color .12s",
                   display: "inline-block",
+                  marginRight: i < words.length - 1 ? "0.16em" : 0,
                   animation: on && ["pop", "bounce", "zoom", "fade"].includes(style.animation)
                     ? `cf-word-${style.animation} .22s ease both`
                     : undefined,
-                }}>{w}{" "}</span>
+                }}>{w}</span>
               );
             })
           : text}
@@ -681,7 +683,7 @@ export default function CaptionEditor() {
       }
       const audio = await prepareAudio(video.file);
       if (!transcriptionWorkerRef.current) {
-        transcriptionWorkerRef.current = new Worker(asset("/transcription.worker.mjs?v=4"), { type: "module" });
+        transcriptionWorkerRef.current = new Worker(asset("/transcription.worker.mjs?v=5"), { type: "module" });
       }
       const worker = transcriptionWorkerRef.current;
       const result = await new Promise<{ chunks: { text: string; timestamp?: [number | null, number | null] }[]; text: string; device: "webgpu" | "wasm" }>((resolve, reject) => {
@@ -998,6 +1000,9 @@ export default function CaptionEditor() {
     ctx.textAlign = style.align as CanvasTextAlign;
     ctx.lineJoin = "round";
     ctx.miterLimit = 2;
+    const canvasText = ctx as CanvasRenderingContext2D & { letterSpacing?: string; wordSpacing?: string };
+    canvasText.letterSpacing = `${style.letterSpacing * (fontPx / 30)}px`;
+    canvasText.wordSpacing = `${fontPx * 0.16}px`;
 
     const maxW = (style.maxWidthPct / 100) * W;
     const lines = wrapLines(ctx, text, maxW, style.maxLines || 2);
@@ -1058,7 +1063,7 @@ export default function CaptionEditor() {
           }
           ctx.fillStyle = highlighted ? style.highlightColor : style.color;
           ctx.fillText(w, penX, y);
-          penX += ctx.measureText(w + " ").width;
+          penX += ctx.measureText(w).width + fontPx * 0.16;
         });
         ctx.textAlign = prevAlign;
       } else {
