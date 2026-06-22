@@ -1,10 +1,10 @@
 "use client";
 
 import { useState } from "react";
-import { ArrowLeft, Download, Link, LoaderCircle, Type } from "lucide-react";
+import { Download, Link, LoaderCircle } from "lucide-react";
 import { detectDownloadPlatform, downloaderServiceUrl } from "@/lib/downloader";
 
-export default function VideoDownloader({ onHome }: { onHome: () => void }) {
+export default function VideoDownloader() {
   const [url, setUrl] = useState("");
   const [downloading, setDownloading] = useState(false);
   const [error, setError] = useState("");
@@ -48,12 +48,8 @@ export default function VideoDownloader({ onHome }: { onHome: () => void }) {
   }
 
   return (
-    <main style={{ minHeight: "100vh", background: "#13111C", color: "#ECE8F3", fontFamily: "Inter, system-ui, sans-serif" }}>
+    <main style={{ height: "100vh", overflow: "auto", background: "#13111C", color: "#ECE8F3", fontFamily: "Inter, system-ui, sans-serif" }}>
       <header style={{ display: "flex", alignItems: "center", gap: 12, padding: "14px 20px", borderBottom: "1px solid #352D47", background: "#1A1724" }}>
-        <button onClick={onHome} title="Back to home" style={iconButton}>
-          <Type size={18} color="#1a1300" strokeWidth={2.6} />
-        </button>
-        <button onClick={onHome} style={backButton}><ArrowLeft size={15} /> Home</button>
         <div style={{ fontWeight: 800, fontSize: 16 }}>Video Downloader</div>
       </header>
 
@@ -103,25 +99,3 @@ export default function VideoDownloader({ onHome }: { onHome: () => void }) {
     </main>
   );
 }
-
-const iconButton: React.CSSProperties = {
-  width: 32,
-  height: 32,
-  display: "grid",
-  placeItems: "center",
-  background: "#FFCA3A",
-  border: 0,
-  borderRadius: 9,
-  cursor: "pointer",
-};
-
-const backButton: React.CSSProperties = {
-  display: "flex",
-  alignItems: "center",
-  gap: 5,
-  background: "transparent",
-  border: 0,
-  color: "#A99FC2",
-  cursor: "pointer",
-  fontWeight: 700,
-};
