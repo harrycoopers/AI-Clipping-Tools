@@ -1,3 +1,10 @@
+import {
+  expandChunksToWords,
+  isMissingCrossAttentionError,
+  normalizeTranscriptionError,
+  pipelineRuntimeOptions,
+} from "./transcription-core.mjs";
+
 const TRANSFORMERS_CDN =
   "https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.8.1";
 
@@ -13,54 +20,6 @@ const MODEL_IDS = {
 
 function send(type, payload = {}) {
   self.postMessage({ type, ...payload });
-}
-
-function normalizeError(error, backend) {
-  const message = error instanceof Error ? error.message : String(error);
-  if (/memory|allocation|buffer|out of bounds/i.test(message)) {
-    return "The transcription model ran out of memory. Close other tabs or choose the Fast model.";
-  }
-  if (backend === "webgpu" && /webgpu|gpu|adapter|device|shader|pipeline/i.test(message)) {
-    return "WebGPU could not run this model on this device. Retry with CPU/WASM mode.";
-  }
-  if (backend === "wasm" && /wasm|webassembly|onnx|backend|execution provider/i.test(message)) {
-    return `CPU/WASM transcription could not start: ${message}`;
-  }
-  if (/fetch|network|download|404/i.test(message)) {
-    return "The AI model could not be downloaded. Check the connection and retry.";
-  }
-  return message || "Transcription failed.";
-}
-
-function isMissingCrossAttentionError(error) {
-  const message = error instanceof Error ? error.message : String(error);
-  return /cross[\s_-]?attentions?|output_attentions/i.test(message);
-}
-
-function expandChunksToWords(chunks) {
-  const words = [];
-
-  for (const chunk of Array.isArray(chunks) ? chunks : []) {
-    const text = String(chunk?.text || "").trim();
-    if (!text) continue;
-
-    const parts = text.split(/\s+/).filter(Boolean);
-    const start = Number(chunk?.timestamp?.[0]);
-    const end = Number(chunk?.timestamp?.[1]);
-    const hasTimestamp = Number.isFinite(start) && Number.isFinite(end) && end > start;
-
-    for (let index = 0; index < parts.length; index += 1) {
-      const timestamp = hasTimestamp
-        ? [
-            start + ((end - start) * index) / parts.length,
-            start + ((end - start) * (index + 1)) / parts.length,
-          ]
-        : null;
-      words.push({ text: parts[index], timestamp });
-    }
-  }
-
-  return words;
 }
 
 async function loadPipeline(model, requestedDevice, forceReload = false) {
@@ -83,8 +42,7 @@ async function loadPipeline(model, requestedDevice, forceReload = false) {
   loadedKey = "";
   send("stage", { stage: "model", status: "active", detail: `Loading ${model} model on ${device.toUpperCase()}` });
 
-  const options = {
-    progress_callback: (event) => {
+  const options = pipelineRuntimeOptions(device, (event) => {
       if (cancelled) return;
       const progress = Number.isFinite(event?.progress) ? Math.round(event.progress) : null;
       send("model-progress", {
@@ -92,19 +50,39 @@ async function loadPipeline(model, requestedDevice, forceReload = false) {
         file: event?.file || event?.name || "",
         status: event?.status || "downloading",
       });
-    },
-  };
-  if (device === "webgpu") {
-    options.device = "webgpu";
-    options.dtype = { encoder_model: "fp16", decoder_model_merged: "q4" };
-  }
-  // For CPU, omit `device` and `dtype`: Transformers.js officially defaults
-  // to its broadly-compatible q8 WASM path in browsers.
+    });
 
   transcriber = await pipeline("automatic-speech-recognition", modelId, options);
   loadedKey = key;
   send("stage", { stage: "model", status: "complete", detail: "Model ready" });
   return transcriber;
+}
+
+async function recognizeWithTimestamps(recognizer, audio, options) {
+  try {
+    return await recognizer(audio, options);
+  } catch (error) {
+    if (!isMissingCrossAttentionError(error)) throw error;
+
+    // Some optimized decoder exports do not expose cross-attention tensors.
+    // Segment timestamps use Whisper's timestamp tokens instead, so retain
+    // usable timing data and distribute each segment across its words.
+    send("stage", {
+      stage: "transcription",
+      status: "active",
+      detail: "Word timing unavailable; using segment timing",
+    });
+    const segmentOptions = { ...options };
+    delete segmentOptions.output_attentions;
+    const result = await recognizer(audio, {
+      ...segmentOptions,
+      return_timestamps: true,
+    });
+    return {
+      ...result,
+      chunks: expandChunksToWords(result?.chunks),
+    };
+  }
 }
 
 self.onmessage = async (event) => {
@@ -155,28 +133,16 @@ self.onmessage = async (event) => {
     };
     let result;
     try {
-      result = await recognizer(message.audio, options);
+      result = await recognizeWithTimestamps(recognizer, message.audio, options);
     } catch (error) {
-      if (!isMissingCrossAttentionError(error)) throw error;
+      if (device !== "webgpu" || message.allowFallback === false) throw error;
 
-      // Some optimized decoder exports do not expose cross-attention tensors.
-      // Segment timestamps use Whisper's timestamp tokens instead, so retain
-      // usable timing data and distribute each segment across its words.
-      send("stage", {
-        stage: "transcription",
-        status: "active",
-        detail: "Word timing unavailable; using segment timing",
+      send("device-fallback", {
+        detail: "WebGPU inference failed; retrying transcription with CPU/WASM.",
       });
-      const segmentOptions = { ...options };
-      delete segmentOptions.output_attentions;
-      result = await recognizer(message.audio, {
-        ...segmentOptions,
-        return_timestamps: true,
-      });
-      result = {
-        ...result,
-        chunks: expandChunksToWords(result?.chunks),
-      };
+      device = "wasm";
+      recognizer = await loadPipeline(message.model, device, true);
+      result = await recognizeWithTimestamps(recognizer, message.audio, options);
     }
     if (cancelled) return send("cancelled");
     send("stage", { stage: "transcription", status: "complete", detail: "Speech recognised" });
@@ -188,7 +154,7 @@ self.onmessage = async (event) => {
   } catch (error) {
     if (!cancelled) {
       send("error", {
-        message: normalizeError(error, device),
+        message: normalizeTranscriptionError(error, device),
         backend: device,
         technical: error instanceof Error ? error.message : String(error),
       });

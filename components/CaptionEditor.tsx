@@ -636,6 +636,20 @@ export default function CaptionEditor() {
     return mono;
   }
 
+  async function selectTranscriptionDevice(): Promise<"webgpu" | "wasm"> {
+    if (!preferWebGpu || !("gpu" in navigator)) return "wasm";
+
+    try {
+      const gpu = (navigator as Navigator & {
+        gpu: { requestAdapter: () => Promise<unknown | null> };
+      }).gpu;
+      const adapter = await gpu.requestAdapter();
+      return adapter ? "webgpu" : "wasm";
+    } catch {
+      return "wasm";
+    }
+  }
+
   async function startTranscription(forceReload = false) {
     if (!video || transcribing) return;
     setTranscribing(true);
@@ -657,9 +671,17 @@ export default function CaptionEditor() {
     });
 
     try {
+      const requestedDevice = await selectTranscriptionDevice();
+      if (preferWebGpu && requestedDevice === "wasm") {
+        setTranscription((current) => ({
+          ...current,
+          device: "wasm",
+          detail: "WebGPU is unavailable; using CPU/WASM",
+        }));
+      }
       const audio = await prepareAudio(video.file);
       if (!transcriptionWorkerRef.current) {
-        transcriptionWorkerRef.current = new Worker(asset("/transcription.worker.mjs?v=3"), { type: "module" });
+        transcriptionWorkerRef.current = new Worker(asset("/transcription.worker.mjs?v=4"), { type: "module" });
       }
       const worker = transcriptionWorkerRef.current;
       const result = await new Promise<{ chunks: { text: string; timestamp?: [number | null, number | null] }[]; text: string; device: "webgpu" | "wasm" }>((resolve, reject) => {
@@ -703,7 +725,7 @@ export default function CaptionEditor() {
           audio,
           model: transcriptionModel,
           language,
-          device: preferWebGpu && "gpu" in navigator ? "webgpu" : "wasm",
+          device: requestedDevice,
           allowFallback: true,
           forceReload,
         }, [audio.buffer]);
